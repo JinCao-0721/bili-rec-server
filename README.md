@@ -142,7 +142,7 @@ systemctl enable --now napcat  # 如果使用 QQ 通知
     { "id": 123456789, "rooms": [] }
   ],
   "notify_groups": [
-    { "id": 987654321, "rooms": [23251279] }
+    { "id": 987654321, "rooms": [11111] }
   ]
 }
 ```
