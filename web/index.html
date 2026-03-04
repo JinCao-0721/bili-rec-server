@@ -410,7 +410,7 @@ function RoomSection(props) {
       body: JSON.stringify({ objectId: rm.objectId, roomId: rm.id }),
     });
     const d = await res.json();
-    if (d.code === 0) onReload();
+    if (d.code === 0) setTimeout(onReload, 800);
     else setMsg({ text: '操作失败：' + d.message, type: 'err' });
   }
 
@@ -680,7 +680,7 @@ function App() {
     loadStatus();
     loadRooms();
     loadNotify();
-    var t = setInterval(loadStatus, 5000);
+    var t = setInterval(function() { loadStatus(); loadRooms(); }, 5000);
     return function() { clearInterval(t); };
   }, []);
 
@@ -693,9 +693,9 @@ function App() {
 
   return (
     <div className="min-h-screen text-white">
-      <div className="max-w-2xl mx-auto px-4 pt-10 pb-20">
+      <div className="max-w-6xl mx-auto px-4 pt-10 pb-20">
 
-        <header className="flex items-end justify-between mb-10">
+        <header className="flex items-end justify-between mb-8">
           <h1 className="text-3xl font-bold tracking-tight">录播监控</h1>
           <div className="text-right">
             {lastUpdate && <p className="text-xs text-white/20 mb-1.5">更新于 {lastUpdate}</p>}
@@ -705,38 +705,40 @@ function App() {
           </div>
         </header>
 
-        <section className="mb-5">
-          <div className="bg-white/[0.06] backdrop-blur-xl border border-white/[0.08] rounded-3xl p-5">
-            <SectionTitle>状态</SectionTitle>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <UploadCard data={upload} />
-              <DiskCard   data={disk} />
-              <BaiduCard  data={baidu} />
-              <BrecCard   data={brecCook} />
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 items-start">
+
+          {/* 左列：状态 + QQ机器人 */}
+          <div className="space-y-5">
+            <div className="bg-white/[0.06] backdrop-blur-xl border border-white/[0.08] rounded-3xl p-5">
+              <SectionTitle>状态</SectionTitle>
+              <div className="grid grid-cols-2 gap-3">
+                <UploadCard data={upload} />
+                <DiskCard   data={disk} />
+                <BaiduCard  data={baidu} />
+                <BrecCard   data={brecCook} />
+              </div>
+            </div>
+
+            <div className="bg-white/[0.06] backdrop-blur-xl border border-white/[0.08] rounded-3xl p-5">
+              <SectionTitle>QQ 机器人</SectionTitle>
+              <QQBotSection data={napcat} />
             </div>
           </div>
-        </section>
 
-        <section className="mb-5">
-          <div className="bg-white/[0.06] backdrop-blur-xl border border-white/[0.08] rounded-3xl p-5">
-            <SectionTitle>QQ 机器人</SectionTitle>
-            <QQBotSection data={napcat} />
-          </div>
-        </section>
+          {/* 右列：录播房间 + 通知设置 */}
+          <div className="space-y-5">
+            <div className="bg-white/[0.06] backdrop-blur-xl border border-white/[0.08] rounded-3xl p-5">
+              <SectionTitle>录播房间</SectionTitle>
+              <RoomSection rooms={rooms} onReload={loadRooms} />
+            </div>
 
-        <section className="mb-5">
-          <div className="bg-white/[0.06] backdrop-blur-xl border border-white/[0.08] rounded-3xl p-5">
-            <SectionTitle>录播房间</SectionTitle>
-            <RoomSection rooms={rooms} onReload={loadRooms} />
+            <div className="bg-white/[0.06] backdrop-blur-xl border border-white/[0.08] rounded-3xl p-5">
+              <SectionTitle>通知设置</SectionTitle>
+              <NotifySection rooms={rooms} config={notifyConf} />
+            </div>
           </div>
-        </section>
 
-        <section className="mb-5">
-          <div className="bg-white/[0.06] backdrop-blur-xl border border-white/[0.08] rounded-3xl p-5">
-            <SectionTitle>通知设置</SectionTitle>
-            <NotifySection rooms={rooms} config={notifyConf} />
-          </div>
-        </section>
+        </div>
 
       </div>
     </div>

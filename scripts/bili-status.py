@@ -7,6 +7,7 @@ import re
 import subprocess
 import os
 import time
+import threading
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
@@ -24,7 +25,52 @@ BREC_START_SH = "/usr/local/bin/brec-start.sh"
 
 _napcat_cache = {"ts": 0, "data": None}
 _CACHE_TTL = 10
-_suppress_start_notify = set()  # 手动开启录制时，抑制下次 SessionStarted 通知
+_recording_last_true = {}  # room_id -> timestamp，上次 recording=True 的时间
+_RECORDING_GRACE = 5       # 秒：recording 变 False 后宽限期，避免切片间隙闪烁
+
+# ── 直播状态轮询（推送逻辑，与录制完全解耦）────────────────────
+_live_status = {}   # room_id -> bool，上次已知直播状态
+_live_lock   = threading.Lock()
+
+
+def _bilibili_live_status(room_id):
+    """查询 B站 API，返回直播状态：True=在播, False=下播, None=查询失败"""
+    try:
+        url = f"https://api.live.bilibili.com/room/v1/Room/get_info?room_id={room_id}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read())
+        return data.get("data", {}).get("live_status") == 1
+    except Exception:
+        return None
+
+
+def _poll_live():
+    """后台线程：轮询所有房间直播状态，状态变化时发通知"""
+    while True:
+        time.sleep(10)
+        try:
+            rooms = get_brec_rooms()
+        except Exception:
+            continue
+        for rm in rooms:
+            room_id   = rm["id"]
+            room_name = rm["name"]
+            is_live = _bilibili_live_status(room_id)
+            if is_live is None:
+                continue
+            with _live_lock:
+                prev = _live_status.get(room_id)
+                if prev == is_live:
+                    continue
+                _live_status[room_id] = is_live
+            if prev is None:
+                continue  # 首次检测，不发通知
+            if is_live:
+                msg = f"🔴 直播开始！\n主播：{room_name}\n房间：{room_id}\nhttps://live.bilibili.com/{room_id}"
+            else:
+                msg = f"⚫ 直播结束\n主播：{room_name}\n房间：{room_id}"
+            send_notifications(msg, room_id)
 
 
 # ── 录制开关配置 ──────────────────────────────────────────────
@@ -111,14 +157,24 @@ def get_brec_rooms():
     try:
         rooms = _brec_request("/api/room")
         disabled = set(int(r) for r in load_record_config().get("disabled_rooms", []))
-        return [{
-            "objectId":  rm["objectId"],
-            "id":        rm["roomId"],
-            "name":      rm.get("name", str(rm["roomId"])),
-            "streaming": rm.get("streaming", False),
-            "recording": rm.get("recording", False),
-            "autoRecord": rm["roomId"] not in disabled,
-        } for rm in rooms]
+        now = time.time()
+        result = []
+        for rm in rooms:
+            room_id   = rm["roomId"]
+            recording = rm.get("recording", False)
+            if recording:
+                _recording_last_true[room_id] = now
+            elif room_id in _recording_last_true and now - _recording_last_true[room_id] < _RECORDING_GRACE:
+                recording = True  # 宽限期内，保持显示录制中
+            result.append({
+                "objectId":  rm["objectId"],
+                "id":        room_id,
+                "name":      rm.get("name", str(room_id)),
+                "streaming": rm.get("streaming", False),
+                "recording": recording,
+                "autoRecord": room_id not in disabled,
+            })
+        return result
     except Exception:
         return []
 
@@ -388,8 +444,8 @@ class StatusHandler(BaseHTTPRequestHandler):
                 room_name = edata.get('Name') or edata.get('name', '') or \
                             edata.get('room_info', {}).get('room_name', '')
                 if etype in ('SessionStarted', 'LiveBeganEvent'):
+                    # 录播逻辑：该房间被用户关闭录制时，立即停止本次会话
                     if room_id and is_room_disabled(room_id):
-                        # 该房间已被用户关闭录制，立即停止本次会话
                         try:
                             all_rooms = _brec_request("/api/room")
                             for rm in all_rooms:
@@ -398,17 +454,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     break
                         except Exception:
                             pass
-                    elif room_id and int(room_id) in _suppress_start_notify:
-                        # 手动开启录制触发的 SessionStarted，不发通知
-                        _suppress_start_notify.discard(int(room_id))
-                    else:
-                        msg = f"🔴 直播开始！\n主播：{room_name}\n房间：{room_id}\nhttps://live.bilibili.com/{room_id}"
-                        send_notifications(msg, room_id)
-                elif etype in ('SessionEnded', 'LiveEndedEvent'):
-                    # 手动关闭录制也会触发 SessionEnded，此时不发通知
-                    if not (room_id and is_room_disabled(room_id)):
-                        msg = f"⚫ 直播结束\n主播：{room_name}\n房间：{room_id}"
-                        send_notifications(msg, room_id)
             except Exception:
                 pass
             self.send_response(200)
@@ -491,16 +536,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                 d = json.loads(body)
                 object_id = d.get('objectId', '')
                 room_id   = d.get('roomId', 0)
-                # 如果房间当前正在直播，标记抑制下次 SessionStarted 通知
-                if room_id:
-                    try:
-                        all_rooms = _brec_request("/api/room")
-                        for rm in all_rooms:
-                            if rm.get("roomId") == int(room_id) and rm.get("streaming"):
-                                _suppress_start_notify.add(int(room_id))
-                                break
-                    except Exception:
-                        pass
                 result = _brec_request(f"/api/room/{object_id}/start", method="POST")
                 if room_id:
                     set_room_disabled(room_id, False)
@@ -518,6 +553,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                 result = _brec_request(f"/api/room/{object_id}/stop", method="POST")
                 if room_id:
                     set_room_disabled(room_id, True)
+                    _recording_last_true.pop(int(room_id), None)  # 清宽限期缓存
                 _json_response(self, {'code': 0, 'result': result})
             except Exception as e:
                 _json_response(self, {'code': -1, 'message': str(e)}, 400)
@@ -582,6 +618,7 @@ class StatusHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == '__main__':
+    threading.Thread(target=_poll_live, daemon=True).start()
     server = HTTPServer(('127.0.0.1', 2234), StatusHandler)
     print('状态 API 启动在 127.0.0.1:2234')
     server.serve_forever()
