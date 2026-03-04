@@ -1,0 +1,13 @@
+[Unit]
+Description=BililiveRecorder
+After=network.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+User=root
+ExecStart=/usr/local/bin/brec-start.sh
+
+[Install]
+WantedBy=multi-user.target

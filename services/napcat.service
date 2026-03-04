@@ -1,0 +1,22 @@
+[Unit]
+Description=NapCat QQ Bot (Launcher)
+After=network.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+User=root
+WorkingDirectory=/opt/napcat-shell
+Environment=HOME=/root
+ExecStartPre=/bin/bash -c "rm -f /tmp/.X1-lock; Xvfb :1 -screen 0 1x1x8 +extension GLX +render > /dev/null 2>&1 &"
+Environment=DISPLAY=:1
+ExecStart=/bin/bash -c "trap '' SIGPIPE; LD_PRELOAD=/opt/napcat-shell/libnapcat_launcher.so /opt/QQ/qq --no-sandbox"
+StandardOutput=append:/var/log/napcat.log
+StandardError=append:/var/log/napcat.log
+NoNewPrivileges=false
+PrivateTmp=false
+PrivateDevices=false
+
+[Install]
+WantedBy=multi-user.target

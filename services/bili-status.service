@@ -1,0 +1,12 @@
+[Unit]
+Description=Bilibili Recording Status API
+After=network.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+ExecStart=/usr/bin/python3 /usr/local/bin/bili-status.py
+
+[Install]
+WantedBy=multi-user.target

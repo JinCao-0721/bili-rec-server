@@ -1,0 +1,8 @@
+# 敏感配置（不要提交真实配置）
+/etc/bili-notify.json
+/etc/bili-record.json
+
+# 系统文件
+*.log
+*.pyc
+__pycache__/

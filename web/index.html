@@ -1,0 +1,750 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>录播监控</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      background: linear-gradient(145deg, #0d0b1a 0%, #0a0f1e 50%, #0d0b1a 100%);
+      background-attachment: fixed;
+    }
+    input, button { font-family: inherit; }
+    * { box-sizing: border-box; }
+    input[type="checkbox"] { accent-color: #0a84ff; cursor: pointer; width: 14px; height: 14px; }
+  </style>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="text-white min-h-screen">
+<div id="root"></div>
+<script type="text/babel">
+
+const { useState, useEffect, useRef, useCallback } = React;
+
+/* ── Inline SVG icons ──────────────────────────────────────── */
+function IcoTrash() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
+    </svg>
+  );
+}
+function IcoPlus() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+      <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+    </svg>
+  );
+}
+function IcoRefresh() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+    </svg>
+  );
+}
+function IcoLogout() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
+    </svg>
+  );
+}
+
+/* ── Utilities ─────────────────────────────────────────────── */
+function fmtBytes(b) {
+  if (!b) return '—';
+  if (b >= 1099511627776) return (b / 1099511627776).toFixed(2) + ' TB';
+  if (b >= 1073741824)    return (b / 1073741824).toFixed(2) + ' GB';
+  return (b / 1048576).toFixed(1) + ' MB';
+}
+const newKey = () => Math.random().toString(36).slice(2);
+
+/* ── Shared UI ─────────────────────────────────────────────── */
+function Dot(props) {
+  const color = props.color || 'gray';
+  const map = {
+    green:  '#30d158',
+    red:    '#ff453a',
+    yellow: '#ffd60a',
+    blue:   '#0a84ff',
+    gray:   'rgba(255,255,255,0.2)',
+  };
+  return (
+    <span style={{ background: map[color] || map.gray }}
+      className="inline-block w-2 h-2 rounded-full flex-shrink-0" />
+  );
+}
+
+function Btn(props) {
+  const color  = props.color  || 'blue';
+  const size   = props.size   || 'md';
+  const cls    = props.className || '';
+  const colors = { blue: 'text-[#0a84ff]', red: 'text-[#ff453a]', green: 'text-[#30d158]', muted: 'text-white/40' };
+  const sizes  = { sm: 'text-xs px-3 py-1.5', md: 'text-sm px-4 py-2' };
+  return (
+    <button onClick={props.onClick} disabled={props.disabled}
+      className={'bg-white/[0.08] rounded-xl font-medium transition-all duration-150 active:scale-95 hover:bg-white/[0.13] border-0 cursor-pointer disabled:opacity-40 ' + sizes[size] + ' ' + colors[color] + ' ' + cls}>
+      {props.children}
+    </button>
+  );
+}
+
+function Field(props) {
+  const cls = props.className || '';
+  const rest = Object.assign({}, props);
+  delete rest.className;
+  return (
+    <input {...rest}
+      className={'bg-white/[0.06] border border-white/[0.1] rounded-xl px-3 py-2 text-sm text-white outline-none focus:border-[#0a84ff] transition-colors placeholder:text-white/25 ' + cls} />
+  );
+}
+
+function Msg(props) {
+  if (!props.text) return null;
+  const c = props.type === 'ok' ? 'text-[#30d158]' : props.type === 'err' ? 'text-[#ff453a]' : 'text-white/40';
+  return <p className={'text-xs mt-2 ' + c}>{props.text}</p>;
+}
+
+function SectionTitle(props) {
+  return (
+    <div className="text-xs font-semibold text-white/30 uppercase tracking-[0.08em] mb-3 px-1">
+      {props.children}
+    </div>
+  );
+}
+
+/* ── Upload Card ───────────────────────────────────────────── */
+function UploadCard(props) {
+  const data   = props.data;
+  const active = data && data.active;
+  return (
+    <div className="bg-white/[0.05] rounded-2xl p-5">
+      <div className="text-xs font-medium text-white/40 mb-3">上传</div>
+      <div className="text-xl font-semibold tracking-tight flex items-center gap-2">
+        <Dot color={active ? 'green' : 'gray'} />
+        <span>{active ? '上传中' : '空闲'}</span>
+      </div>
+      {active && (
+        <div className="mt-2">
+          {data.file     && <div className="text-xs text-white/40 truncate mt-1">{data.file}</div>}
+          {data.speed    && <div className="text-sm font-semibold text-[#0a84ff] mt-1.5">↑ {data.speed}</div>}
+          {data.progress && <div className="text-xs text-white/30">{data.progress}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Disk Card ─────────────────────────────────────────────── */
+function DiskCard(props) {
+  const data    = props.data || {};
+  const free    = data.free    || 0;
+  const used    = data.used    || 0;
+  const total   = data.total   || 0;
+  const percent = data.percent || 0;
+  return (
+    <div className="bg-white/[0.05] rounded-2xl p-5">
+      <div className="text-xs font-medium text-white/40 mb-3">磁盘</div>
+      <div className="text-xl font-semibold tracking-tight">{fmtBytes(free)}</div>
+      <div className="text-xs text-white/40 mt-1">已用 {percent}%</div>
+      <div className="text-xs text-white/25 mt-0.5">{fmtBytes(used)} / {fmtBytes(total)}</div>
+      <div className="h-1 bg-white/10 rounded-full mt-3 overflow-hidden">
+        <div className="h-full rounded-full transition-all duration-700"
+          style={{ width: percent + '%', background: percent > 85 ? '#ff453a' : '#0a84ff' }} />
+      </div>
+    </div>
+  );
+}
+
+/* ── Baidu Card ────────────────────────────────────────────── */
+function BaiduCard(props) {
+  const data   = props.data;
+  const [open,   setOpen]   = useState(false);
+  const [bduss,  setBduss]  = useState('');
+  const [stoken, setStoken] = useState('');
+  const [msg,    setMsg]    = useState({ text: '', type: '' });
+
+  async function doLogin() {
+    if (!bduss.trim()) { setMsg({ text: '请输入 BDUSS', type: 'err' }); return; }
+    setMsg({ text: '登录中…', type: '' });
+    try {
+      const res = await fetch('/bili-baidu-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bduss: bduss.trim(), stoken: stoken.trim() }),
+      });
+      const d = await res.json();
+      if (d.success) {
+        setOpen(false); setBduss(''); setStoken('');
+        setMsg({ text: '登录成功', type: 'ok' });
+      } else {
+        setMsg({ text: '登录失败：' + d.message, type: 'err' });
+      }
+    } catch (e) { setMsg({ text: '请求失败', type: 'err' }); }
+  }
+
+  async function doLogout() {
+    if (!confirm('确认退出百度云？退出后上传功能将不可用。')) return;
+    const res = await fetch('/bili-baidu-logout', { method: 'POST' });
+    const d   = await res.json();
+    if (!d.success) setMsg({ text: '退出失败', type: 'err' });
+  }
+
+  const loggedIn = data && data.logged_in;
+  return (
+    <div className="bg-white/[0.05] rounded-2xl p-5">
+      <div className="text-xs font-medium text-white/40 mb-3">百度云</div>
+      <div className="text-xl font-semibold tracking-tight flex items-center gap-2">
+        <Dot color={!data ? 'gray' : loggedIn ? 'green' : 'red'} />
+        <span>{!data ? '检测中' : loggedIn ? '已登录' : '未登录'}</span>
+      </div>
+      {loggedIn && data.username && <div className="text-xs text-white/40 mt-1">{data.username}</div>}
+      {data && !loggedIn && <div className="text-xs text-white/30 mt-1">上传功能不可用</div>}
+      <div className="flex gap-2 mt-3">
+        {loggedIn
+          ? <Btn size="sm" color="red" onClick={doLogout}>退出登录</Btn>
+          : <Btn size="sm" onClick={function() { setOpen(function(o) { return !o; }); }}>登录</Btn>}
+      </div>
+      {open && (
+        <div className="mt-3 space-y-2">
+          <Field type="password" placeholder="BDUSS" value={bduss}
+            onChange={function(e) { setBduss(e.target.value); }} className="w-full" />
+          <Field type="password" placeholder="STOKEN（可选）" value={stoken}
+            onChange={function(e) { setStoken(e.target.value); }} className="w-full" />
+          <div className="flex gap-2">
+            <Btn size="sm" onClick={doLogin}>确认</Btn>
+            <Btn size="sm" color="muted" onClick={function() { setOpen(false); setMsg({ text: '', type: '' }); }}>取消</Btn>
+          </div>
+        </div>
+      )}
+      <Msg text={msg.text} type={msg.type} />
+    </div>
+  );
+}
+
+/* ── BRec Cookie Card ──────────────────────────────────────── */
+function BrecCard(props) {
+  const data = props.data;
+  const [open,     setOpen]     = useState(false);
+  const [sessdata, setSessdata] = useState('');
+  const [buvid3,   setBuvid3]   = useState('');
+  const [dede,     setDede]     = useState('');
+  const [msg,      setMsg]      = useState({ text: '', type: '' });
+
+  async function doUpdate() {
+    if (!sessdata.trim()) { setMsg({ text: '请填写 SESSDATA', type: 'err' }); return; }
+    setMsg({ text: '更新中，服务将重启…', type: '' });
+    try {
+      const res = await fetch('/bili-brec-cookie', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessdata: sessdata.trim(), buvid3: buvid3.trim(), dede_user_id: dede.trim() }),
+      });
+      const d = await res.json();
+      if (d.code === 0) {
+        setOpen(false); setSessdata('');
+        setMsg({ text: '更新成功，录播姬已重启', type: 'ok' });
+      } else {
+        setMsg({ text: '更新失败：' + d.message, type: 'err' });
+      }
+    } catch (e) { setMsg({ text: '请求失败', type: 'err' }); }
+  }
+
+  const hasCookie = data && data.has_sessdata;
+  return (
+    <div className="bg-white/[0.05] rounded-2xl p-5">
+      <div className="text-xs font-medium text-white/40 mb-3">录播姬账号</div>
+      <div className="text-xl font-semibold tracking-tight flex items-center gap-2">
+        <Dot color={!data ? 'gray' : hasCookie ? 'green' : 'red'} />
+        <span>{!data ? '检测中' : hasCookie ? 'Cookie 已配置' : '未配置'}</span>
+      </div>
+      {data && data.dede_user_id && <div className="text-xs text-white/40 mt-1">UID {data.dede_user_id}</div>}
+      <div className="flex gap-2 mt-3">
+        <Btn size="sm" onClick={function() { setOpen(function(o) { return !o; }); }}>更新 Cookie</Btn>
+      </div>
+      {open && (
+        <div className="mt-3 space-y-2">
+          <Field type="password" placeholder="SESSDATA（必填）" value={sessdata}
+            onChange={function(e) { setSessdata(e.target.value); }} className="w-full" />
+          <Field type="text" placeholder="buvid3（可选）" value={buvid3}
+            onChange={function(e) { setBuvid3(e.target.value); }} className="w-full" />
+          <Field type="text" placeholder="DedeUserID（可选）" value={dede}
+            onChange={function(e) { setDede(e.target.value); }} className="w-full" />
+          <div className="flex gap-2">
+            <Btn size="sm" onClick={doUpdate}>确认更新</Btn>
+            <Btn size="sm" color="muted" onClick={function() { setOpen(false); setMsg({ text: '', type: '' }); }}>取消</Btn>
+          </div>
+        </div>
+      )}
+      <Msg text={msg.text} type={msg.type} />
+    </div>
+  );
+}
+
+/* ── QQ Bot Section ────────────────────────────────────────── */
+function QQBotSection(props) {
+  const data      = props.data;
+  const running   = data && data.running;
+  const loggedIn  = data && data.logged_in;
+  const needQR    = running && !loggedIn;
+
+  const [countdown, setCountdown] = useState(150);
+  const [imgKey,    setImgKey]    = useState(Date.now());
+  const timerRef = useRef(null);
+
+  function startCountdown() {
+    clearInterval(timerRef.current);
+    setCountdown(150);
+    timerRef.current = setInterval(function() {
+      setCountdown(function(c) {
+        if (c <= 1) { doRefreshQR(); return 150; }
+        return c - 1;
+      });
+    }, 1000);
+  }
+
+  async function doRefreshQR() {
+    await fetch('/bili-refresh-qrcode');
+    setImgKey(Date.now());
+    startCountdown();
+  }
+
+  async function doLogout() {
+    if (!confirm('确认退出 QQ 机器人登录？')) return;
+    const res = await fetch('/bili-qq-logout', { method: 'POST' });
+    const d   = await res.json();
+    if (d.success) window.location.reload();
+  }
+
+  useEffect(function() {
+    if (needQR) startCountdown();
+    else clearInterval(timerRef.current);
+    return function() { clearInterval(timerRef.current); };
+  }, [needQR]);
+
+  const dotColor = !running ? 'gray' : loggedIn ? 'green' : 'yellow';
+  const title    = !running ? 'QQ 机器人未运行'
+                 : loggedIn ? 'QQ 机器人已登录'
+                 : '待扫码登录';
+  const desc     = !running ? 'NapCat 服务未启动。'
+                 : loggedIn ? '机器人在线，直播开播时将自动发送通知。'
+                 : '请用手机 QQ 扫描二维码登录机器人账号。';
+
+  return (
+    <div className="flex gap-4 items-start">
+        {needQR && (
+          <div className="bg-white rounded-xl p-1.5 flex-shrink-0">
+            <img src={'/qrcode.png?t=' + imgKey} alt="QQ 登录二维码"
+              className="w-24 h-24 block" style={{ imageRendering: 'pixelated' }} />
+          </div>
+        )}
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-2">
+            <Dot color={dotColor} />
+            <span className="font-semibold">{title}</span>
+          </div>
+          <p className="text-sm text-white/50 leading-relaxed">{desc}</p>
+          {needQR && (
+            <p className="text-xs text-white/25 mt-1.5">二维码将在 {countdown} 秒后自动刷新</p>
+          )}
+          <div className="flex gap-2 mt-3">
+            {needQR && (
+              <Btn size="sm" onClick={doRefreshQR}>
+                <span className="flex items-center gap-1.5"><IcoRefresh />刷新二维码</span>
+              </Btn>
+            )}
+            {loggedIn && (
+              <Btn size="sm" color="red" onClick={doLogout}>
+                <span className="flex items-center gap-1.5"><IcoLogout />退出登录</span>
+              </Btn>
+            )}
+          </div>
+        </div>
+      </div>
+  );
+}
+
+/* ── Toggle Switch ─────────────────────────────────────────── */
+function Toggle(props) {
+  var on = props.on;
+  return (
+    <button onClick={props.onChange}
+      className={'relative flex-shrink-0 w-11 h-6 rounded-full transition-colors duration-200 border-0 cursor-pointer ' + (on ? 'bg-[#30d158]' : 'bg-white/20')}>
+      <span style={{ left: on ? '22px' : '2px' }}
+        className="absolute top-0.5 w-5 h-5 bg-white rounded-full shadow-sm transition-all duration-200" />
+    </button>
+  );
+}
+
+/* ── Room Section ──────────────────────────────────────────── */
+function RoomSection(props) {
+  const rooms    = props.rooms;
+  const onReload = props.onReload;
+  const [newId, setNewId] = useState('');
+  const [msg,   setMsg]   = useState({ text: '', type: '' });
+
+  async function addRoom() {
+    const v = newId.trim();
+    if (!v || isNaN(v)) { setMsg({ text: '请输入有效房间号', type: 'err' }); return; }
+    const res = await fetch('/bili-room-add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ roomId: parseInt(v) }),
+    });
+    const d = await res.json();
+    if (d.code === 0) { setMsg({ text: '添加成功', type: 'ok' }); setNewId(''); onReload(); }
+    else setMsg({ text: '添加失败：' + d.message, type: 'err' });
+  }
+
+  async function toggleRecord(rm) {
+    const endpoint = rm.autoRecord ? '/bili-room-stop' : '/bili-room-start';
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ objectId: rm.objectId, roomId: rm.id }),
+    });
+    const d = await res.json();
+    if (d.code === 0) onReload();
+    else setMsg({ text: '操作失败：' + d.message, type: 'err' });
+  }
+
+  async function removeRoom(rm) {
+    if (!confirm('确认删除房间「' + (rm.name || rm.id) + '」？')) return;
+    const res = await fetch('/bili-room-remove', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ objectId: rm.objectId }),
+    });
+    const d = await res.json();
+    if (d.code === 0) { setMsg({ text: '已删除', type: 'ok' }); onReload(); }
+    else setMsg({ text: '删除失败：' + d.message, type: 'err' });
+  }
+
+  return (
+    <div>
+      {rooms.length > 0 && (
+        <div className="bg-white/[0.05] rounded-2xl overflow-hidden mb-3">
+          {rooms.map(function(rm, i) {
+            return (
+              <div key={rm.objectId || rm.id}
+                className={'flex items-center gap-3 px-4 py-3.5' + (i > 0 ? ' border-t border-white/[0.06]' : '')}>
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm font-medium">{rm.name || rm.id}</div>
+                  <div className="flex items-center gap-3 mt-0.5">
+                    <span className="text-xs text-white/30">{rm.id}</span>
+                    {rm.streaming && (
+                      <span className="text-xs text-[#ff453a] flex items-center gap-1.5">
+                        <Dot color="red" />直播中
+                      </span>
+                    )}
+                    {rm.recording && (
+                      <span className="text-xs text-[#0a84ff] flex items-center gap-1.5">
+                        <Dot color="blue" />录制中
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <Toggle on={rm.autoRecord} onChange={function() { toggleRecord(rm); }} />
+                <button onClick={function() { removeRoom(rm); }}
+                  className="text-white/20 hover:text-[#ff453a] p-2 rounded-xl hover:bg-[#ff453a]/10 transition-all duration-150">
+                  <IcoTrash />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {rooms.length === 0 && <p className="text-sm text-white/25 px-1 mb-3">暂无房间</p>}
+      <div className="flex gap-2">
+        <Field type="text" placeholder="输入要添加的房间号" value={newId}
+          onChange={function(e) { setNewId(e.target.value); }}
+          onKeyDown={function(e) { if (e.key === 'Enter') addRoom(); }}
+          className="flex-1" />
+        <Btn onClick={addRoom} className="flex-shrink-0">
+          <span className="flex items-center gap-1.5"><IcoPlus />添加</span>
+        </Btn>
+      </div>
+      <Msg text={msg.text} type={msg.type} />
+    </div>
+  );
+}
+
+/* ── Notify Entry ──────────────────────────────────────────── */
+function NotifyEntryItem(props) {
+  const entry    = props.entry;
+  const rooms    = props.rooms;
+  const type     = props.type;
+  const onUpdate = props.onUpdate;
+  const onDelete = props.onDelete;
+
+  function toggleRoom(roomId) {
+    const cur  = entry.rooms || [];
+    const next = cur.indexOf(roomId) >= 0
+      ? cur.filter(function(r) { return r !== roomId; })
+      : cur.concat([roomId]);
+    onUpdate({ rooms: next });
+  }
+
+  return (
+    <div className="bg-white/[0.05] rounded-2xl p-4 mb-2">
+      <div className="flex items-center gap-2">
+        <Field type="text" placeholder={type === 'qq' ? 'QQ 号' : '群号'}
+          value={entry.id}
+          onChange={function(e) { onUpdate({ id: e.target.value }); }}
+          className="flex-1" />
+        <button onClick={onDelete}
+          className="text-white/20 hover:text-[#ff453a] p-2 rounded-xl hover:bg-[#ff453a]/10 transition-all duration-150 flex-shrink-0">
+          <IcoTrash />
+        </button>
+      </div>
+      {rooms.length > 0 && (
+        <div className="flex flex-wrap gap-x-4 gap-y-2 mt-3 pt-3 border-t border-white/[0.06]">
+          <label className="flex items-center gap-1.5 text-xs text-white/50 cursor-pointer select-none">
+            <input type="checkbox" checked={entry.allRooms}
+              onChange={function(e) { onUpdate({ allRooms: e.target.checked, rooms: [] }); }} />
+            全部
+          </label>
+          {rooms.map(function(rm) {
+            var checked = !entry.allRooms && (entry.rooms || []).indexOf(rm.id) >= 0;
+            return (
+              <label key={rm.id}
+                className={'flex items-center gap-1.5 text-xs cursor-pointer select-none transition-opacity ' + (entry.allRooms ? 'opacity-30' : 'text-white/50')}>
+                <input type="checkbox" disabled={entry.allRooms}
+                  checked={checked}
+                  onChange={function() { toggleRoom(rm.id); }} />
+                {rm.name || rm.id}
+              </label>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ── Notify Section ────────────────────────────────────────── */
+function NotifySection(props) {
+  const rooms    = props.rooms;
+  const config   = props.config;
+  const [qqs,    setQqs]    = useState([]);
+  const [groups, setGroups] = useState([]);
+  const [msg,    setMsg]    = useState({ text: '', type: '' });
+
+  function toEntry(e) {
+    return {
+      id:       String(e.id || ''),
+      rooms:    Array.isArray(e.rooms) ? e.rooms : [],
+      allRooms: !e.rooms || e.rooms.length === 0,
+      _key:     newKey(),
+    };
+  }
+
+  useEffect(function() {
+    if (!config) return;
+    setQqs((config.notify_qqs    || []).map(toEntry));
+    setGroups((config.notify_groups || []).map(toEntry));
+  }, [config]);
+
+  function updateQQ(key, upd) {
+    setQqs(function(prev) {
+      return prev.map(function(e) { return e._key === key ? Object.assign({}, e, upd) : e; });
+    });
+  }
+  function updateGroup(key, upd) {
+    setGroups(function(prev) {
+      return prev.map(function(e) { return e._key === key ? Object.assign({}, e, upd) : e; });
+    });
+  }
+
+  async function saveConfig(qqList, grList) {
+    var q = qqList !== undefined ? qqList : qqs;
+    var g = grList !== undefined ? grList : groups;
+    function toData(arr) {
+      return arr
+        .filter(function(e) { return e.id && !isNaN(e.id); })
+        .map(function(e) { return { id: parseInt(e.id), rooms: e.allRooms ? [] : e.rooms }; });
+    }
+    try {
+      const res = await fetch('/bili-notify-config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notify_qqs: toData(q), notify_groups: toData(g) }),
+      });
+      const d = await res.json();
+      setMsg({ text: d.code === 0 ? '保存成功' : '保存失败：' + d.message, type: d.code === 0 ? 'ok' : 'err' });
+    } catch (e) { setMsg({ text: '请求失败', type: 'err' }); }
+  }
+
+  function removeQQ(key) {
+    var next = qqs.filter(function(e) { return e._key !== key; });
+    setQqs(next);
+    saveConfig(next, groups);
+  }
+  function removeGroup(key) {
+    var next = groups.filter(function(e) { return e._key !== key; });
+    setGroups(next);
+    saveConfig(qqs, next);
+  }
+
+  async function sendTest() {
+    setMsg({ text: '发送中…', type: '' });
+    try {
+      await fetch('/bili-notify-test', { method: 'POST' });
+      setMsg({ text: '测试消息已发送', type: 'ok' });
+    } catch (e) { setMsg({ text: '发送失败', type: 'err' }); }
+  }
+
+  function blankEntry() {
+    return { id: '', rooms: [], allRooms: true, _key: newKey() };
+  }
+
+  return (
+    <div>
+      <div className="mb-5">
+        <div className="text-xs text-white/30 font-medium mb-2 px-1">私聊通知</div>
+        {qqs.map(function(e) {
+          return (
+            <NotifyEntryItem key={e._key} entry={e} rooms={rooms} type="qq"
+              onUpdate={function(upd) { updateQQ(e._key, upd); }}
+              onDelete={function() { removeQQ(e._key); }} />
+          );
+        })}
+        <button
+          onClick={function() { setQqs(function(prev) { return prev.concat([blankEntry()]); }); }}
+          className="text-xs text-[#0a84ff] hover:opacity-70 transition-opacity px-1 py-1 mt-1">
+          + 添加 QQ 号
+        </button>
+      </div>
+
+      <div className="mb-5">
+        <div className="text-xs text-white/30 font-medium mb-2 px-1">群通知</div>
+        {groups.map(function(e) {
+          return (
+            <NotifyEntryItem key={e._key} entry={e} rooms={rooms} type="group"
+              onUpdate={function(upd) { updateGroup(e._key, upd); }}
+              onDelete={function() { removeGroup(e._key); }} />
+          );
+        })}
+        <button
+          onClick={function() { setGroups(function(prev) { return prev.concat([blankEntry()]); }); }}
+          className="text-xs text-[#0a84ff] hover:opacity-70 transition-opacity px-1 py-1 mt-1">
+          + 添加群号
+        </button>
+      </div>
+
+      <div className="flex gap-2 mt-2">
+        <Btn onClick={function() { saveConfig(); }}>保存配置</Btn>
+        <Btn color="green" onClick={sendTest}>发送测试</Btn>
+      </div>
+      <Msg text={msg.text} type={msg.type} />
+    </div>
+  );
+}
+
+/* ── App ───────────────────────────────────────────────────── */
+function App() {
+  const [status,     setStatus]  = useState(null);
+  const [rooms,      setRooms]   = useState([]);
+  const [notifyConf, setNotify]  = useState(null);
+  const [lastUpdate, setUpdate]  = useState('');
+
+  async function loadStatus() {
+    try {
+      const d = await fetch('/bili-status').then(function(r) { return r.json(); });
+      setStatus(d);
+      setUpdate(new Date().toLocaleTimeString());
+    } catch (e) {}
+  }
+
+  async function loadRooms() {
+    try {
+      const d = await fetch('/bili-rooms').then(function(r) { return r.json(); });
+      setRooms(d);
+    } catch (e) {}
+  }
+
+  async function loadNotify() {
+    try {
+      const d = await fetch('/bili-notify-config').then(function(r) { return r.json(); });
+      setNotify(d);
+    } catch (e) {}
+  }
+
+  useEffect(function() {
+    loadStatus();
+    loadRooms();
+    loadNotify();
+    var t = setInterval(loadStatus, 5000);
+    return function() { clearInterval(t); };
+  }, []);
+
+  var brecLink = 'http://' + location.hostname + ':2233/ui/';
+  var upload   = status && status.upload;
+  var disk     = status && status.disk;
+  var baidu    = status && status.baidu;
+  var brecCook = status && status.brec_cookie;
+  var napcat   = status && status.napcat;
+
+  return (
+    <div className="min-h-screen text-white">
+      <div className="max-w-2xl mx-auto px-4 pt-10 pb-20">
+
+        <header className="flex items-end justify-between mb-10">
+          <h1 className="text-3xl font-bold tracking-tight">录播监控</h1>
+          <div className="text-right">
+            {lastUpdate && <p className="text-xs text-white/20 mb-1.5">更新于 {lastUpdate}</p>}
+            <a href={brecLink} className="text-sm text-[#0a84ff] hover:opacity-75 transition-opacity">
+              录播姬管理 →
+            </a>
+          </div>
+        </header>
+
+        <section className="mb-5">
+          <div className="bg-white/[0.06] backdrop-blur-xl border border-white/[0.08] rounded-3xl p-5">
+            <SectionTitle>状态</SectionTitle>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <UploadCard data={upload} />
+              <DiskCard   data={disk} />
+              <BaiduCard  data={baidu} />
+              <BrecCard   data={brecCook} />
+            </div>
+          </div>
+        </section>
+
+        <section className="mb-5">
+          <div className="bg-white/[0.06] backdrop-blur-xl border border-white/[0.08] rounded-3xl p-5">
+            <SectionTitle>QQ 机器人</SectionTitle>
+            <QQBotSection data={napcat} />
+          </div>
+        </section>
+
+        <section className="mb-5">
+          <div className="bg-white/[0.06] backdrop-blur-xl border border-white/[0.08] rounded-3xl p-5">
+            <SectionTitle>录播房间</SectionTitle>
+            <RoomSection rooms={rooms} onReload={loadRooms} />
+          </div>
+        </section>
+
+        <section className="mb-5">
+          <div className="bg-white/[0.06] backdrop-blur-xl border border-white/[0.08] rounded-3xl p-5">
+            <SectionTitle>通知设置</SectionTitle>
+            <NotifySection rooms={rooms} config={notifyConf} />
+          </div>
+        </section>
+
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(App, null));
+
+</script>
+</body>
+</html>

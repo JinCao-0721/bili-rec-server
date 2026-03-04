@@ -1,0 +1,14 @@
+[Unit]
+Description=Bilibili Recording Auto Upload
+After=network.target blrec.service
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=5
+ExecStart=/usr/local/bin/bili-upload.sh
+StandardOutput=append:/var/log/bili-upload.log
+StandardError=append:/var/log/bili-upload.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+{
+  "notify_qqs": [
+    {
+      "id": 123456789,
+      "rooms": []
+    }
+  ],
+  "notify_groups": []
+}
