@@ -24,6 +24,7 @@ BREC_START_SH = "/usr/local/bin/brec-start.sh"
 
 _napcat_cache = {"ts": 0, "data": None}
 _CACHE_TTL = 10
+_suppress_start_notify = set()  # 手动开启录制时，抑制下次 SessionStarted 通知
 
 
 # ── 录制开关配置 ──────────────────────────────────────────────
@@ -397,12 +398,17 @@ class StatusHandler(BaseHTTPRequestHandler):
                                     break
                         except Exception:
                             pass
+                    elif room_id and int(room_id) in _suppress_start_notify:
+                        # 手动开启录制触发的 SessionStarted，不发通知
+                        _suppress_start_notify.discard(int(room_id))
                     else:
                         msg = f"🔴 直播开始！\n主播：{room_name}\n房间：{room_id}\nhttps://live.bilibili.com/{room_id}"
                         send_notifications(msg, room_id)
                 elif etype in ('SessionEnded', 'LiveEndedEvent'):
-                    msg = f"⚫ 直播结束\n主播：{room_name}\n房间：{room_id}"
-                    send_notifications(msg, room_id)
+                    # 手动关闭录制也会触发 SessionEnded，此时不发通知
+                    if not (room_id and is_room_disabled(room_id)):
+                        msg = f"⚫ 直播结束\n主播：{room_name}\n房间：{room_id}"
+                        send_notifications(msg, room_id)
             except Exception:
                 pass
             self.send_response(200)
@@ -485,6 +491,16 @@ class StatusHandler(BaseHTTPRequestHandler):
                 d = json.loads(body)
                 object_id = d.get('objectId', '')
                 room_id   = d.get('roomId', 0)
+                # 如果房间当前正在直播，标记抑制下次 SessionStarted 通知
+                if room_id:
+                    try:
+                        all_rooms = _brec_request("/api/room")
+                        for rm in all_rooms:
+                            if rm.get("roomId") == int(room_id) and rm.get("streaming"):
+                                _suppress_start_notify.add(int(room_id))
+                                break
+                    except Exception:
+                        pass
                 result = _brec_request(f"/api/room/{object_id}/start", method="POST")
                 if room_id:
                     set_room_disabled(room_id, False)

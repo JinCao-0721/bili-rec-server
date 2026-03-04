@@ -25,7 +25,7 @@ parse_target() {
     # 提取日期（前 8 位）
     local DATE="${DATETIME:0:8}"                    # "20260304"
 
-    REMOTE_DIR="$BAIDU_BASE/$ROOM_DIR/$DATE"
+    REMOTE_DIR="$BAIDU_BASE/$NAME/$DATE"
     REMOTE_NAME="$NAME-$DATETIME.$EXT"
 }
 
