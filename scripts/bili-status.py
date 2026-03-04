@@ -24,6 +24,7 @@ BREC_PASS = "your_brec_password"
 BREC_START_SH = "/usr/local/bin/brec-start.sh"
 
 _napcat_cache = {"ts": 0, "data": None}
+_baidu_cache  = {"ts": 0, "data": None}
 _CACHE_TTL = 10
 _recording_last_true = {}  # room_id -> timestamp，上次 recording=True 的时间
 _RECORDING_GRACE = 5       # 秒：recording 变 False 后宽限期，避免切片间隙闪烁
@@ -316,13 +317,19 @@ def get_disk_info():
 
 
 def get_baidu_status():
+    global _baidu_cache
+    now = time.time()
+    if _baidu_cache["data"] is not None and now - _baidu_cache["ts"] < _CACHE_TTL:
+        return _baidu_cache["data"]
     result = subprocess.run(['BaiduPCS-Go', 'who'], capture_output=True, text=True)
     output = result.stdout.strip()
     uid_match  = re.search(r'uid:\s*(\d+)', output)
     name_match = re.search(r'用户名:\s*([^,]+)', output)
     uid  = int(uid_match.group(1)) if uid_match else 0
     name = name_match.group(1).strip() if name_match else ''
-    return {'logged_in': uid != 0, 'username': name if uid != 0 else ''}
+    data = {'logged_in': uid != 0, 'username': name if uid != 0 else ''}
+    _baidu_cache = {"ts": now, "data": data}
+    return data
 
 
 def baidu_login(bduss, stoken):
@@ -355,19 +362,23 @@ def get_upload_status():
     if os.path.exists(log_path):
         with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
             lines = f.readlines()
-        # 从近 20 行找文件名和上传状态
-        for line in reversed(lines[-20:]):
+        # 从近 50 行找最近一次上传事件，记录其行号
+        start_idx = -1
+        for i in range(len(lines) - 1, max(len(lines) - 50, -1), -1):
+            line = lines[i]
             if '开始上传' in line:
-                m = re.search(r'开始上传: (.+?) 大小:', line)
+                m = re.search(r'开始上传: (.+?) →', line)
                 if m:
                     upload_file = os.path.basename(m.group(1).strip())
                 active = True
+                start_idx = i
                 break
             if '上传成功' in line or '上传失败' in line:
                 break
-        # 从近 200 行找最新速度（BaiduPCS-Go 进度行格式：↑ xx/xx xx/s）
+        # 只在 开始上传 之后的行中找进度，避免拿到上一个文件的进度
         if active:
-            for line in reversed(lines[-200:]):
+            search_lines = lines[start_idx:] if start_idx >= 0 else lines[-200:]
+            for line in reversed(search_lines):
                 m = re.search(r'↑\s+([\d.]+\s*\w+)/([\d.]+\s*\w+)\s+([\d.]+\s*\w+/s)', line)
                 if m:
                     upload_progress = f"{m.group(1)}/{m.group(2)}"
@@ -375,6 +386,22 @@ def get_upload_status():
                     break
     return {'active': active, 'file': upload_file,
             'speed': upload_speed, 'progress': upload_progress}
+
+
+def get_upload_queue():
+    """扫描录播目录，返回待上传的视频文件列表（已上传的会被删除，剩下的即为待上传）"""
+    queue = []
+    watch_dir = "/data/recordings"
+    for root, dirs, files in os.walk(watch_dir):
+        for f in sorted(files):
+            if f.endswith(('.flv', '.ts', '.mp4')):
+                path = os.path.join(root, f)
+                try:
+                    size = os.path.getsize(path)
+                    queue.append({'name': f, 'size': size})
+                except Exception:
+                    pass
+    return queue
 
 
 # ── 通知发送 ─────────────────────────────────────────────────
@@ -592,6 +619,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                     'has_buvid3':       bool(cookie_fields.get('buvid3')),
                     'dede_user_id':     cookie_fields.get('DedeUserID', ''),
                 },
+                'upload_queue': get_upload_queue(),
                 'timestamp': datetime.now().isoformat()
             })
 
