@@ -95,7 +95,7 @@ COOKIE="SESSDATA=xxx; buvid3=xxx; DedeUserID=xxx;"
 
 # 替换为要录制的直播间号（空格分隔）
 /data/recordings \
-  23251279 1854704441
+  YOUR_ROOM_ID_1 YOUR_ROOM_ID_2
 ```
 
 编辑 `/usr/local/bin/bili-status.py` 顶部常量：
