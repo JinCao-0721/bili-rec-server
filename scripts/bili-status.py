@@ -181,17 +181,28 @@ def get_brec_rooms():
 
 
 def _get_sh_room_ids():
-    """从 brec-start.sh 最后一行读取房间号列表"""
+    """从 brec-start.sh 找到纯数字行读取房间号列表"""
     with open(BREC_START_SH, 'r') as f:
         lines = f.read().rstrip().split('\n')
-    return [int(t) for t in lines[-1].split() if t.isdigit()]
+    # 找最后一个只含数字（空格分隔）的行
+    for line in reversed(lines):
+        ids = [int(t) for t in line.split() if t.isdigit()]
+        if ids:
+            return ids
+    return []
 
 
 def _set_sh_room_ids(room_ids):
-    """将房间号列表写回 brec-start.sh 最后一行"""
+    """将房间号列表写回 brec-start.sh 中的房间号行"""
     with open(BREC_START_SH, 'r') as f:
         lines = f.read().rstrip().split('\n')
-    lines[-1] = '  ' + ' '.join(str(r) for r in room_ids) if room_ids else ''
+    # 找最后一个只含数字的行并替换，找不到则追加在 /data/recordings 行之后
+    for i in reversed(range(len(lines))):
+        if all(t.isdigit() for t in lines[i].split() if t):
+            lines[i] = '  ' + ' '.join(str(r) for r in room_ids) if room_ids else ''
+            break
+    else:
+        lines.append('  ' + ' '.join(str(r) for r in room_ids) if room_ids else '')
     with open(BREC_START_SH, 'w') as f:
         f.write('\n'.join(lines) + '\n')
 
@@ -350,8 +361,27 @@ def baidu_logout():
     return {'success': result.returncode == 0}
 
 
-def qq_logout(cred):
-    return _napcat_post("/api/QQLogin/Logout", cred)
+def qq_switch_account():
+    subprocess.run(['systemctl', 'stop', 'napcat'], capture_output=True)
+    # 清除 NapCat 自动登录账号
+    webui_path = '/opt/napcat-shell/napcat/config/webui.json'
+    try:
+        with open(webui_path, 'r') as f:
+            cfg = json.load(f)
+        cfg['autoLoginAccount'] = ''
+        with open(webui_path, 'w') as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=4)
+    except Exception:
+        pass
+    # 清除 QQ 登录 session 文件
+    import glob
+    for p in glob.glob('/root/.config/QQ/nt_qq/global/nt_data/Login/.*'):
+        try:
+            os.remove(p)
+        except Exception:
+            pass
+    subprocess.run(['systemctl', 'start', 'napcat'], capture_output=True)
+    return True
 
 
 def get_upload_status():
@@ -537,14 +567,9 @@ class StatusHandler(BaseHTTPRequestHandler):
             _json_response(self, baidu_logout())
 
         elif self.path == '/api/qq-logout':
-            napcat = get_napcat_status()
-            cred = napcat.get('_cred', '')
-            if cred:
-                result = qq_logout(cred)
-                _napcat_cache['data'] = None  # 清缓存
-                _json_response(self, {'success': True, 'result': result})
-            else:
-                _json_response(self, {'success': False, 'message': 'napcat not running'})
+            ok = qq_switch_account()
+            _napcat_cache['data'] = None  # 清缓存
+            _json_response(self, {'success': ok})
 
         elif self.path == '/api/room-add':
             length = int(self.headers.get('Content-Length', 0))
@@ -611,7 +636,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             _json_response(self, {
                 'disk':   get_disk_info(),
                 'upload': get_upload_status(),
-                'napcat': {'running': napcat['running'], 'logged_in': napcat['logged_in']},
+                'napcat': {'running': napcat['running'], 'logged_in': napcat['logged_in'], 'token': NAPCAT_TOKEN},
                 'baidu':  get_baidu_status(),
                 'notify': load_notify_config(),
                 'brec_cookie': {

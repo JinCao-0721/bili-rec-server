@@ -48,14 +48,6 @@ function IcoRefresh() {
     </svg>
   );
 }
-function IcoLogout() {
-  return (
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>
-    </svg>
-  );
-}
-
 /* ── Utilities ─────────────────────────────────────────────── */
 function fmtBytes(b) {
   if (!b) return '—';
@@ -343,10 +335,12 @@ function QQBotSection(props) {
   const data      = props.data;
   const running   = data && data.running;
   const loggedIn  = data && data.logged_in;
+  const token     = data && data.token;
   const needQR    = running && !loggedIn;
 
-  const [countdown, setCountdown] = useState(150);
-  const [imgKey,    setImgKey]    = useState(Date.now());
+  const [countdown,  setCountdown] = useState(150);
+  const [imgKey,     setImgKey]    = useState(Date.now());
+  const [logoutMsg,  setLogoutMsg] = useState('');
   const timerRef = useRef(null);
 
   function startCountdown() {
@@ -367,10 +361,20 @@ function QQBotSection(props) {
   }
 
   async function doLogout() {
-    if (!confirm('确认退出 QQ 机器人登录？')) return;
-    const res = await fetch('/bili-qq-logout', { method: 'POST' });
-    const d   = await res.json();
-    if (d.success) window.location.reload();
+    if (!confirm('确认切换账号？将清除当前登录并重启机器人，稍后需要扫码登录新账号。')) return;
+    setLogoutMsg('切换中，请稍候…');
+    try {
+      const res = await fetch('/bili-qq-logout', { method: 'POST' });
+      const d   = await res.json();
+      if (d.success) {
+        setLogoutMsg('已清除，等待二维码出现…');
+        setTimeout(function() { window.location.reload(); }, 3000);
+      } else {
+        setLogoutMsg('切换失败：' + (d.message || '未知错误'));
+      }
+    } catch (e) {
+      setLogoutMsg('请求失败');
+    }
   }
 
   useEffect(function() {
@@ -401,6 +405,9 @@ function QQBotSection(props) {
             <span className="font-semibold">{title}</span>
           </div>
           <p className="text-sm text-white/50 leading-relaxed">{desc}</p>
+          {loggedIn && token && (
+            <p className="text-xs text-white/25 mt-1 font-mono">Token: {token}</p>
+          )}
           {needQR && (
             <p className="text-xs text-white/25 mt-1.5">二维码将在 {countdown} 秒后自动刷新</p>
           )}
@@ -411,11 +418,10 @@ function QQBotSection(props) {
               </Btn>
             )}
             {loggedIn && (
-              <Btn size="sm" color="red" onClick={doLogout}>
-                <span className="flex items-center gap-1.5"><IcoLogout />退出登录</span>
-              </Btn>
+              <Btn size="sm" color="red" onClick={doLogout}>切换账号</Btn>
             )}
           </div>
+          {logoutMsg && <p className="text-xs mt-2 text-white/40">{logoutMsg}</p>}
         </div>
       </div>
   );
@@ -762,6 +768,10 @@ function App() {
             {lastUpdate && <p className="text-xs text-white/20 mb-1.5">更新于 {lastUpdate}</p>}
             <a href={brecLink} className="text-sm text-[#0a84ff] hover:opacity-75 transition-opacity">
               录播姬管理 →
+            </a>
+            <br />
+            <a href={'http://' + location.hostname + ':6099/'} className="text-sm text-[#0a84ff] hover:opacity-75 transition-opacity">
+              QQ 机器人管理 →
             </a>
           </div>
         </header>
