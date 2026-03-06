@@ -2,7 +2,7 @@
 # 重启 NapCat 前确保 autoLoginAccount 已设置
 # NapCat 运行期间会自行清空该字段，需要在重启前写回
 
-WEBUI_JSON="/opt/napcat-shell/napcat/config/webui.json"
+WEBUI_JSON="/root/Napcat/opt/QQ/resources/app/app_launcher/napcat/config/webui.json"
 ONEBOT_URL="http://127.0.0.1:5700"
 
 # 尝试从 OneBot 获取当前登录的 QQ 号

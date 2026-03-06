@@ -245,7 +245,15 @@ def build_cookie_str(sessdata, buvid3, dede_user_id):
 
 
 def brec_add_room(room_id):
-    result = _brec_request("/api/room", method="POST", data={"roomId": room_id})
+    result = _brec_request("/api/room", method="POST", data={"roomId": room_id, "autoRecord": True})
+    # 新添加的房间清除 disabled 状态，并自动开始录制
+    set_room_disabled(room_id, False)
+    try:
+        obj_id = result.get("objectId", "")
+        if obj_id:
+            _brec_request(f"/api/room/{obj_id}/start", method="POST")
+    except Exception:
+        pass
     # 同步写入 brec-start.sh
     ids = _get_sh_room_ids()
     if room_id not in ids:
@@ -300,7 +308,7 @@ def get_napcat_status():
         return _napcat_cache["data"]
     cred = _napcat_credential()
     if not cred:
-        ps = subprocess.run(['pgrep', '-f', 'libnapcat_launcher'], capture_output=True, text=True)
+        ps = subprocess.run(['pgrep', '-f', 'napcat'], capture_output=True, text=True)
         result = {"running": bool(ps.stdout.strip()), "logged_in": False}
     else:
         d = _napcat_post("/api/QQLogin/CheckLoginStatus", cred)
@@ -364,7 +372,7 @@ def baidu_logout():
 def qq_switch_account():
     subprocess.run(['systemctl', 'stop', 'napcat'], capture_output=True)
     # 清除 NapCat 自动登录账号
-    webui_path = '/opt/napcat-shell/napcat/config/webui.json'
+    webui_path = '/root/Napcat/opt/QQ/resources/app/app_launcher/napcat/config/webui.json'
     try:
         with open(webui_path, 'r') as f:
             cfg = json.load(f)

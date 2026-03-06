@@ -19,7 +19,7 @@ parse_target() {
     REMOTE_NAME=$(basename "$FILE")                 # "拉拉肥探险家-20260304-105200.flv"
 }
 
-# 上传函数：建目录后上传，文件名与本地一致无需重命名
+# 上传函数：建目录后上传，通过对比本地和远端文件大小确认上传完整
 # 参数：$1=本地文件路径  $2=远端目录  $3=远端文件名（用于验证）
 baidu_upload() {
     local FILE="$1"
@@ -36,12 +36,49 @@ baidu_upload() {
     OUT=$(cat "$TMP")
     rm -f "$TMP"
     if echo "$OUT" | grep -q "上传失败\|错误\|error\|Error\|failed\|未检测到"; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 上传命令报错: $REMOTE_NAME" >> "$LOG"
         return 1
     fi
-    if BaiduPCS-Go ls "$REMOTE_DIR/$REMOTE_NAME" > /dev/null 2>&1; then
-        return 0
+
+    # 验证远端文件存在且大小与本地一致
+    local LOCAL_SIZE
+    LOCAL_SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
+    local REMOTE_INFO
+    REMOTE_INFO=$(BaiduPCS-Go ls -l "$REMOTE_DIR/" 2>&1)
+    if ! echo "$REMOTE_INFO" | grep -qF "$REMOTE_NAME"; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 验证失败：远端文件不存在: $REMOTE_DIR/$REMOTE_NAME" >> "$LOG"
+        return 1
     fi
-    return 1
+    # 用python从ls -l输出中提取文件大小（格式如 45.70MB）
+    local REMOTE_BYTES
+    REMOTE_BYTES=$(echo "$REMOTE_INFO" | python3 -c "
+import sys, re
+name = '$REMOTE_NAME'
+for line in sys.stdin:
+    if name not in line:
+        continue
+    # 匹配带单位的大小，如 45.70MB、5.00KB、1.23GB
+    m = re.search(r'(\d+\.?\d*)(B|KB|MB|GB|TB)', line)
+    if m:
+        val, unit = float(m.group(1)), m.group(2)
+        units = {'B':1, 'KB':1024, 'MB':1024**2, 'GB':1024**3, 'TB':1024**4}
+        print(int(val * units[unit]))
+        break
+" 2>/dev/null)
+    if [ -z "$REMOTE_BYTES" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 验证失败：无法解析远端文件大小: $REMOTE_NAME" >> "$LOG"
+        return 1
+    fi
+    # 允许 2% 误差（百度云显示的大小有四舍五入）
+    local DIFF=$(( LOCAL_SIZE - REMOTE_BYTES ))
+    DIFF=${DIFF#-}  # 取绝对值
+    local THRESHOLD=$(( LOCAL_SIZE / 50 + 1024 ))
+    if [ "$DIFF" -gt "$THRESHOLD" ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 验证失败：大小不匹配 本地=${LOCAL_SIZE} 远端=${REMOTE_BYTES}: $REMOTE_NAME" >> "$LOG"
+        return 1
+    fi
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 验证通过：本地=${LOCAL_SIZE} 远端=${REMOTE_BYTES}: $REMOTE_NAME" >> "$LOG"
+    return 0
 }
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] 上传监控启动，监控目录: $WATCH_DIR" >> "$LOG"
