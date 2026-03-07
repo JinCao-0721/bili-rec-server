@@ -18,6 +18,7 @@ ONEBOT_URL = "http://127.0.0.1:5700"
 NAPCAT_TIMEOUT = 8
 NOTIFY_CONFIG_PATH = "/etc/bili-notify.json"
 RECORD_CONFIG_PATH = "/etc/bili-record.json"
+AUTH_CONFIG_PATH = "/etc/bili-auth.json"
 BREC_URL = "http://127.0.0.1:2233"
 BREC_USER = "your_brec_username"
 BREC_PASS = "your_brec_password"
@@ -72,6 +73,59 @@ def _poll_live():
             else:
                 msg = f"⚫ 直播结束\n主播：{room_name}\n房间：{room_id}"
             send_notifications(msg, room_id)
+
+
+# ── 登录认证 ──────────────────────────────────────────────────
+
+import secrets
+import http.cookies
+
+_sessions = {}  # token -> {"user": username, "ts": timestamp}
+_SESSION_TTL = 86400 * 7  # 7 天
+
+
+def _load_auth_config():
+    try:
+        with open(AUTH_CONFIG_PATH, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return {"username": "admin", "password": "admin"}
+
+
+def _check_login(username, password):
+    cfg = _load_auth_config()
+    return username == cfg.get("username") and password == cfg.get("password")
+
+
+def _create_session(username):
+    token = secrets.token_hex(32)
+    _sessions[token] = {"user": username, "ts": time.time()}
+    return token
+
+
+def _validate_session(cookie_header):
+    if not cookie_header:
+        return False
+    c = http.cookies.SimpleCookie()
+    try:
+        c.load(cookie_header)
+    except Exception:
+        return False
+    token = c.get("session")
+    if not token:
+        return False
+    token = token.value
+    sess = _sessions.get(token)
+    if not sess:
+        return False
+    if time.time() - sess["ts"] > _SESSION_TTL:
+        _sessions.pop(token, None)
+        return False
+    return True
+
+
+# 不需要认证的路径
+_PUBLIC_PATHS = {'/api/login', '/api/auth-check', '/api/brec-webhook', '/api/blrec-webhook'}
 
 
 # ── 录制开关配置 ──────────────────────────────────────────────
@@ -497,7 +551,45 @@ class StatusHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
 
+    def _require_auth(self):
+        if self.path in _PUBLIC_PATHS:
+            return True
+        cookie = self.headers.get('Cookie', '')
+        if _validate_session(cookie):
+            return True
+        _json_response(self, {'code': 401, 'message': 'unauthorized'}, 401)
+        return False
+
     def do_POST(self):
+        if self.path == '/api/login':
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length)
+            try:
+                d = json.loads(body)
+                username = d.get('username', '')
+                password = d.get('password', '')
+                if _check_login(username, password):
+                    token = _create_session(username)
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json; charset=utf-8')
+                    self.send_header('Set-Cookie', f'session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={_SESSION_TTL}')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({'code': 0, 'message': 'ok'}).encode())
+                else:
+                    _json_response(self, {'code': -1, 'message': '用户名或密码错误'}, 401)
+            except Exception as e:
+                _json_response(self, {'code': -1, 'message': str(e)}, 400)
+            return
+
+        if self.path == '/api/auth-check':
+            cookie = self.headers.get('Cookie', '')
+            ok = _validate_session(cookie)
+            _json_response(self, {'code': 0, 'authenticated': ok})
+            return
+
+        if not self._require_auth():
+            return
+
         if self.path in ('/api/brec-webhook', '/api/blrec-webhook'):
             length = int(self.headers.get('Content-Length', 0))
             body = self.rfile.read(length)
@@ -637,6 +729,15 @@ class StatusHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def do_GET(self):
+        if self.path == '/api/auth-check':
+            cookie = self.headers.get('Cookie', '')
+            ok = _validate_session(cookie)
+            _json_response(self, {'code': 0, 'authenticated': ok})
+            return
+
+        if not self._require_auth():
+            return
+
         if self.path == '/api/status':
             napcat = get_napcat_status()
             cookie_str = get_brec_cookie()

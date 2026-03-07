@@ -713,8 +713,64 @@ function NotifySection(props) {
   );
 }
 
+/* ── Login ─────────────────────────────────────────────────── */
+function LoginScreen({ onLogin }) {
+  const [user, setUser] = useState('');
+  const [pass, setPass] = useState('');
+  const [err, setErr]   = useState('');
+  const [loading, setLoading] = useState(false);
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    setLoading(true);
+    setErr('');
+    try {
+      const res = await fetch('/bili-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: user, password: pass }),
+      });
+      const d = await res.json();
+      if (d.code === 0) {
+        onLogin();
+      } else {
+        setErr(d.message || '登录失败');
+      }
+    } catch (ex) {
+      setErr('网络错误');
+    }
+    setLoading(false);
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center">
+      <form onSubmit={handleLogin} className="bg-white/[0.06] backdrop-blur-xl border border-white/[0.08] rounded-3xl p-8 w-full max-w-sm">
+        <h2 className="text-2xl font-bold tracking-tight mb-6 text-center">录播监控</h2>
+        <div className="space-y-4">
+          <div>
+            <label className="text-xs text-white/40 block mb-1.5 px-1">用户名</label>
+            <Field value={user} onChange={function(e){setUser(e.target.value)}}
+              placeholder="用户名" className="w-full" autoFocus />
+          </div>
+          <div>
+            <label className="text-xs text-white/40 block mb-1.5 px-1">密码</label>
+            <Field type="password" value={pass} onChange={function(e){setPass(e.target.value)}}
+              placeholder="密码" className="w-full" />
+          </div>
+          <button type="submit" disabled={loading}
+            className="w-full bg-[#0a84ff] hover:bg-[#0a84ff]/80 text-white text-sm font-medium rounded-xl py-2.5 transition-all active:scale-[0.98] disabled:opacity-50 border-0 cursor-pointer">
+            {loading ? '登录中...' : '登录'}
+          </button>
+          {err && <p className="text-xs text-[#ff453a] text-center">{err}</p>}
+        </div>
+      </form>
+    </div>
+  );
+}
+
 /* ── App ───────────────────────────────────────────────────── */
 function App() {
+  const [authed,     setAuthed]  = useState(null); // null=checking, true/false
   const [status,     setStatus]  = useState(null);
   const [rooms,      setRooms]   = useState([]);
   const [notifyConf, setNotify]  = useState(null);
@@ -743,12 +799,19 @@ function App() {
   }
 
   useEffect(function() {
+    fetch('/bili-auth-check').then(function(r) { return r.json(); }).then(function(d) {
+      setAuthed(d.authenticated === true);
+    }).catch(function() { setAuthed(false); });
+  }, []);
+
+  useEffect(function() {
+    if (!authed) return;
     loadStatus();
     loadRooms();
     loadNotify();
     var t = setInterval(function() { loadStatus(); loadRooms(); }, 1000);
     return function() { clearInterval(t); };
-  }, []);
+  }, [authed]);
 
   var brecLink = 'http://' + location.hostname + ':2233/ui/';
   var upload      = status && status.upload;
@@ -757,6 +820,9 @@ function App() {
   var baidu    = status && status.baidu;
   var brecCook = status && status.brec_cookie;
   var napcat   = status && status.napcat;
+
+  if (authed === null) return null; // checking auth
+  if (!authed) return <LoginScreen onLogin={function() { setAuthed(true); }} />;
 
   return (
     <div className="min-h-screen text-white">
