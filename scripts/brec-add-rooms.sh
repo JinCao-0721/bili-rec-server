@@ -45,4 +45,11 @@ else
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] No rooms config found at $ROOMS_FILE, creating from current rooms"
 fi
 
+# Set global cutting mode: BY_SIZE, 4096MB (4GB) via GraphQL
+# Note: --cutting-mode CLI option does NOT work in portable mode, must use GraphQL API
+curl -s -u "$AUTH" -X POST "http://127.0.0.1:2233/graphql" \
+    -H 'Content-Type: application/json' \
+    -d '{"query":"mutation { setConfig(config: { optionalCuttingMode: { hasValue: true, value: BY_SIZE }, optionalCuttingNumber: { hasValue: true, value: 4096 } }) { optionalCuttingMode { hasValue value } optionalCuttingNumber { hasValue value } } }"}' > /dev/null 2>&1
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Set cutting mode: BY_SIZE 4096MB"
+
 /usr/local/bin/brec-save-rooms.sh

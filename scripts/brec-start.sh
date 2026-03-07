@@ -10,6 +10,4 @@ exec /opt/brec/BililiveRecorder.Cli portable \
   --webhook-url http://127.0.0.1:2234/api/brec-webhook \
   --filename '{{ name }}/{{ "now" | time_zone: "Asia/Shanghai" | format_date: "yyyyMMdd" }}/{{ name }}-{{ "now" | time_zone: "Asia/Shanghai" | format_date: "yyyyMMdd-HHmmss" }}' \
   --mode RawData \
-  --cutting-mode ByFileSize \
-  --cutting-number 4096 \
   /data/recordings
