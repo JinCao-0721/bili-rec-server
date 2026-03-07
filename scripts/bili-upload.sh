@@ -6,17 +6,38 @@ BAIDU_BASE="/录播"
 LOG="/var/log/bili-upload.log"
 
 # 从本地文件路径解析百度云目标目录
-# 本地路径: /data/recordings/{name}/{yyyyMMdd}/{name}-{yyyyMMdd-HHmmss}.ext
-# 目标路径: /录播/{name}/{yyyyMMdd}/{name}-{yyyyMMdd-HHmmss}.ext（文件名相同，无需重命名）
+# 格式1（自定义模板）: /data/recordings/{name}/{yyyyMMdd}/{name}-{yyyyMMdd-HHmmss}.ext
+# 格式2（默认格式）:   /data/recordings/{roomId}-{name}/录制-{roomId}-{yyyyMMdd}-{HHmmss}-{index}-{title}.ext
+# 目标路径: /录播/{name}/{yyyyMMdd}/filename.ext
 parse_target() {
     local FILE="$1"
-    local DATE_DIR
-    DATE_DIR=$(basename "$(dirname "$FILE")")       # "20260304"
-    local NAME_DIR
-    NAME_DIR=$(basename "$(dirname "$(dirname "$FILE")")")  # "拉拉肥探险家"
+    local PARENT_DIR
+    PARENT_DIR=$(basename "$(dirname "$FILE")")
+    local GRANDPARENT_DIR
+    GRANDPARENT_DIR=$(basename "$(dirname "$(dirname "$FILE")")")
 
-    REMOTE_DIR="$BAIDU_BASE/$NAME_DIR/$DATE_DIR"
-    REMOTE_NAME=$(basename "$FILE")                 # "拉拉肥探险家-20260304-105200.flv"
+    # 判断父目录是否为日期格式 (yyyyMMdd)
+    if [[ "$PARENT_DIR" =~ ^[0-9]{8}$ ]]; then
+        # 格式1: {name}/{yyyyMMdd}/filename.ext
+        REMOTE_DIR="$BAIDU_BASE/$GRANDPARENT_DIR/$PARENT_DIR"
+    else
+        # 格式2: {roomId}-{name}/filename.ext — 从文件名提取日期
+        local NAME_DIR="$PARENT_DIR"
+        # 去掉 roomId- 前缀（如 "23251279-初初Rachel" → "初初Rachel"）
+        if [[ "$NAME_DIR" =~ ^[0-9]+-(.+)$ ]]; then
+            NAME_DIR="${BASH_REMATCH[1]}"
+        fi
+        # 从文件名中提取日期（匹配 yyyyMMdd）
+        local FILENAME
+        FILENAME=$(basename "$FILE")
+        local FILE_DATE
+        FILE_DATE=$(echo "$FILENAME" | grep -oP '20\d{6}' | head -1)
+        if [ -z "$FILE_DATE" ]; then
+            FILE_DATE=$(date '+%Y%m%d')
+        fi
+        REMOTE_DIR="$BAIDU_BASE/$NAME_DIR/$FILE_DATE"
+    fi
+    REMOTE_NAME=$(basename "$FILE")
 }
 
 # 上传函数：建目录后上传，通过对比本地和远端文件大小确认上传完整

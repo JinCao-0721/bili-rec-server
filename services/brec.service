@@ -8,6 +8,7 @@ Restart=always
 RestartSec=10
 User=root
 ExecStart=/usr/local/bin/brec-start.sh
+ExecStartPost=/usr/local/bin/brec-add-rooms.sh
 
 [Install]
 WantedBy=multi-user.target
