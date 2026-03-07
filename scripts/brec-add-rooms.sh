@@ -1,6 +1,6 @@
 #!/bin/bash
 # brec 启动后：清理幽灵房间，从配置文件恢复房间列表
-AUTH="admin:admin"
+AUTH="your_username:your_password"
 API="http://127.0.0.1:2233/api/room"
 ROOMS_FILE="/etc/brec-rooms.json"
 

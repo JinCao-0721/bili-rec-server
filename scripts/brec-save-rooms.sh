@@ -1,6 +1,6 @@
 #!/bin/bash
 # 保存当前 brec 房间列表到配置文件
-AUTH="admin:admin"
+AUTH="your_username:your_password"
 API="http://127.0.0.1:2233/api/room"
 ROOMS_FILE="/etc/brec-rooms.json"
 
