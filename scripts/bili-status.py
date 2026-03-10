@@ -23,6 +23,7 @@ BREC_URL = "http://127.0.0.1:2233"
 BREC_USER = "your_brec_username"
 BREC_PASS = "your_brec_password"
 BREC_START_SH = "/usr/local/bin/brec-start.sh"
+BREC_CONFIG_JSON = "/data/recordings/config.json"
 
 _napcat_cache = {"ts": 0, "data": None}
 _baidu_cache  = {"ts": 0, "data": None}
@@ -262,21 +263,35 @@ def _set_sh_room_ids(room_ids):
 
 
 def get_brec_cookie():
-    """从 brec-start.sh 读取当前 Cookie 字符串"""
-    with open(BREC_START_SH, 'r') as f:
-        content = f.read()
-    m = re.search(r'COOKIE="([^"]+)"', content)
-    return m.group(1) if m else ''
+    """从 config.json 读取当前 Cookie 字符串"""
+    try:
+        with open(BREC_CONFIG_JSON, 'r') as f:
+            cfg = json.load(f)
+        cookie = cfg.get('global', {}).get('Cookie', {})
+        if cookie.get('HasValue'):
+            return cookie.get('Value', '')
+    except Exception:
+        pass
+    return ''
 
 
 def set_brec_cookie(cookie_str):
-    """更新 brec-start.sh 中的 Cookie，并重启服务"""
-    with open(BREC_START_SH, 'r') as f:
-        content = f.read()
-    new_content = re.sub(r'COOKIE="[^"]*"', f'COOKIE="{cookie_str}"', content)
-    with open(BREC_START_SH, 'w') as f:
-        f.write(new_content)
-    subprocess.run(['systemctl', 'restart', 'brec'])
+    """通过 GraphQL API 热更新 Cookie（无需重启录播姬）"""
+    escaped = cookie_str.replace('\\', '\\\\').replace('"', '\\"')
+    query = ('mutation { setConfig(config: { optionalCookie: '
+             '{ hasValue: true, value: "' + escaped + '" } }) '
+             '{ optionalCookie { hasValue value } } }')
+    data = json.dumps({"query": query}).encode()
+    req = urllib.request.Request(
+        f'{BREC_URL}/graphql',
+        data=data,
+        headers={
+            'Content-Type': 'application/json',
+            'Authorization': 'Basic ' + base64.b64encode(
+                f'{BREC_USER}:{BREC_PASS}'.encode()).decode(),
+        },
+    )
+    urllib.request.urlopen(req, timeout=10)
 
 
 def parse_cookie_fields(cookie_str):

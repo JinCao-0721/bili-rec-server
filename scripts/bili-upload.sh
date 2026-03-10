@@ -56,7 +56,10 @@ baidu_upload() {
     local OUT
     OUT=$(cat "$TMP")
     rm -f "$TMP"
-    if echo "$OUT" | grep -q "上传失败\|错误\|error\|Error\|failed\|未检测到"; then
+    # 只看最终结果：有"上传文件成功"就算成功，忽略中途的重试错误
+    if echo "$OUT" | grep -q "上传文件成功"; then
+        : # 上传命令报告成功，继续验证文件大小
+    elif echo "$OUT" | grep -q "上传失败\|未检测到"; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 上传命令报错: $REMOTE_NAME" >> "$LOG"
         return 1
     fi
