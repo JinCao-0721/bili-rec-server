@@ -603,10 +603,11 @@ function NotifySection(props) {
   const [msg,    setMsg]    = useState({ text: '', type: '' });
 
   function toEntry(e) {
+    var hasAllRooms = 'allRooms' in e;
     return {
       id:       String(e.id || ''),
       rooms:    Array.isArray(e.rooms) ? e.rooms : [],
-      allRooms: !e.rooms || e.rooms.length === 0,
+      allRooms: hasAllRooms ? !!e.allRooms : (!e.rooms || e.rooms.length === 0),
       _key:     newKey(),
     };
   }
@@ -634,7 +635,7 @@ function NotifySection(props) {
     function toData(arr) {
       return arr
         .filter(function(e) { return e.id && !isNaN(e.id); })
-        .map(function(e) { return { id: parseInt(e.id), rooms: e.allRooms ? [] : e.rooms }; });
+        .map(function(e) { return { id: parseInt(e.id), rooms: e.allRooms ? [] : e.rooms, allRooms: !!e.allRooms }; });
     }
     try {
       const res = await fetch('/bili-notify-config', {
