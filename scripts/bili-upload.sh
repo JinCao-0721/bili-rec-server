@@ -52,7 +52,7 @@ baidu_upload() {
     BaiduPCS-Go mkdir "$REMOTE_DIR" >> "$LOG" 2>&1
 
     BaiduPCS-Go upload --policy overwrite "$FILE" "$REMOTE_DIR/" 2>&1 \
-        | tr '\r' '\n' | tee -a "$LOG" > "$TMP"
+        | stdbuf -oL tr '\r' '\n' | stdbuf -oL tee -a "$LOG" > "$TMP"
     local OUT
     OUT=$(cat "$TMP")
     rm -f "$TMP"
