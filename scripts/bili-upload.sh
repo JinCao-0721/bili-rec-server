@@ -40,68 +40,41 @@ parse_target() {
     REMOTE_NAME=$(basename "$FILE")
 }
 
-# 上传函数：建目录后上传，通过对比本地和远端文件大小确认上传完整
+# 上传函数：用百度网盘 Open API 上传，路径直接写入 /录播/...
 # 参数：$1=本地文件路径  $2=远端目录  $3=远端文件名（用于验证）
 baidu_upload() {
     local FILE="$1"
     local REMOTE_DIR="$2"
     local REMOTE_NAME="$3"
-    local TMP
-    TMP=$(mktemp)
+    local REMOTE_PATH="$REMOTE_DIR/$REMOTE_NAME"
 
-    BaiduPCS-Go mkdir "$REMOTE_DIR" >> "$LOG" 2>&1
-
-    BaiduPCS-Go upload --policy overwrite "$FILE" "$REMOTE_DIR/" 2>&1 \
-        | stdbuf -oL tr '\r' '\n' | stdbuf -oL tee -a "$LOG" > "$TMP"
-    local OUT
-    OUT=$(cat "$TMP")
-    rm -f "$TMP"
-    # 只看最终结果：有"上传文件成功"就算成功，忽略中途的重试错误
-    if echo "$OUT" | grep -q "上传文件成功"; then
-        : # 上传命令报告成功，继续验证文件大小
-    elif echo "$OUT" | grep -q "上传失败\|未检测到"; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 上传命令报错: $REMOTE_NAME" >> "$LOG"
+    # 使用 Open API 上传，进度输出到 stdout
+    python3 /usr/local/bin/baidu-upload.py "$FILE" "$REMOTE_PATH" 2>&1 \
+        | stdbuf -oL tee -a "$LOG"
+    local RC=${PIPESTATUS[0]}
+    if [ $RC -ne 0 ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 上传命令失败 (exit=$RC): $REMOTE_NAME" >> "$LOG"
         return 1
     fi
 
     # 验证远端文件存在且大小与本地一致
     local LOCAL_SIZE
     LOCAL_SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
-    local REMOTE_INFO
-    REMOTE_INFO=$(BaiduPCS-Go ls -l "$REMOTE_DIR/" 2>&1)
-    if ! echo "$REMOTE_INFO" | grep -qF "$REMOTE_NAME"; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 验证失败：远端文件不存在: $REMOTE_DIR/$REMOTE_NAME" >> "$LOG"
+    local REMOTE_SIZE
+    REMOTE_SIZE=$(python3 /usr/local/bin/baidu-upload.py --size "$REMOTE_DIR" "$REMOTE_NAME" 2>/dev/null)
+    if [ -z "$REMOTE_SIZE" ] || [ "$REMOTE_SIZE" -lt 0 ] 2>/dev/null; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 验证失败：远端文件不存在: $REMOTE_PATH" >> "$LOG"
         return 1
     fi
-    # 用python从ls -l输出中提取文件大小（格式如 45.70MB）
-    local REMOTE_BYTES
-    REMOTE_BYTES=$(echo "$REMOTE_INFO" | python3 -c "
-import sys, re
-name = '$REMOTE_NAME'
-for line in sys.stdin:
-    if name not in line:
-        continue
-    # 匹配带单位的大小，如 45.70MB、5.00KB、1.23GB
-    m = re.search(r'(\d+\.?\d*)(B|KB|MB|GB|TB)', line)
-    if m:
-        val, unit = float(m.group(1)), m.group(2)
-        units = {'B':1, 'KB':1024, 'MB':1024**2, 'GB':1024**3, 'TB':1024**4}
-        print(int(val * units[unit]))
-        break
-" 2>/dev/null)
-    if [ -z "$REMOTE_BYTES" ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 验证失败：无法解析远端文件大小: $REMOTE_NAME" >> "$LOG"
-        return 1
-    fi
-    # 允许 2% 误差（百度云显示的大小有四舍五入）
-    local DIFF=$(( LOCAL_SIZE - REMOTE_BYTES ))
-    DIFF=${DIFF#-}  # 取绝对值
+    # 允许 2% 误差
+    local DIFF=$(( LOCAL_SIZE - REMOTE_SIZE ))
+    DIFF=${DIFF#-}
     local THRESHOLD=$(( LOCAL_SIZE / 50 + 1024 ))
     if [ "$DIFF" -gt "$THRESHOLD" ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 验证失败：大小不匹配 本地=${LOCAL_SIZE} 远端=${REMOTE_BYTES}: $REMOTE_NAME" >> "$LOG"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 验证失败：大小不匹配 本地=${LOCAL_SIZE} 远端=${REMOTE_SIZE}: $REMOTE_NAME" >> "$LOG"
         return 1
     fi
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 验证通过：本地=${LOCAL_SIZE} 远端=${REMOTE_BYTES}: $REMOTE_NAME" >> "$LOG"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 验证通过：本地=${LOCAL_SIZE} 远端=${REMOTE_SIZE}: $REMOTE_NAME" >> "$LOG"
     return 0
 }
 

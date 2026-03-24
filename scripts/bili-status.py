@@ -8,8 +8,10 @@ import subprocess
 import os
 import time
 import threading
+import http.cookiejar
 import urllib.request
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from datetime import datetime
 
 NAPCAT_PORT = 6099
@@ -409,13 +411,17 @@ def get_baidu_status():
     now = time.time()
     if _baidu_cache["data"] is not None and now - _baidu_cache["ts"] < _CACHE_TTL:
         return _baidu_cache["data"]
-    result = subprocess.run(['BaiduPCS-Go', 'who'], capture_output=True, text=True)
-    output = result.stdout.strip()
-    uid_match  = re.search(r'uid:\s*(\d+)', output)
-    name_match = re.search(r'用户名:\s*([^,]+)', output)
-    uid  = int(uid_match.group(1)) if uid_match else 0
-    name = name_match.group(1).strip() if name_match else ''
-    data = {'logged_in': uid != 0, 'username': name if uid != 0 else ''}
+    try:
+        cfg = json.load(open('/etc/baidu-openapi.json'))
+        token = cfg.get('access_token', '')
+        req = urllib.request.Request(
+            f"https://pan.baidu.com/rest/2.0/xpan/nas?method=uinfo&access_token={token}")
+        resp = urllib.request.urlopen(req, timeout=8)
+        uinfo = json.loads(resp.read().decode())
+        name = uinfo.get('baidu_name', '')
+        data = {'logged_in': bool(name), 'username': name}
+    except Exception:
+        data = {'logged_in': False, 'username': ''}
     _baidu_cache = {"ts": now, "data": data}
     return data
 
@@ -428,6 +434,116 @@ def baidu_login(bduss, stoken):
     output = (result.stdout + result.stderr).strip()
     success = '登录成功' in output
     return {'success': success, 'message': output}
+
+
+# ── 百度扫码登录 ─────────────────────────────────────────────
+_baidu_qr = {'sign': '', 'status': '', 'message': '', 'login': None, 'thread': None}
+_BAIDU_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'
+
+def _baidu_qr_poll_loop(sign):
+    """后台线程：持续轮询百度 unicast 直到成功/失败/超时"""
+    deadline = time.time() + 180  # 3 分钟超时
+    while time.time() < deadline and _baidu_qr.get('sign') == sign:
+        if _baidu_qr['status'] in ('success', 'error'):
+            return
+        url = ("https://passport.baidu.com/channel/unicast?channel_id=%s"
+               "&tpl=netdisk&apiver=v3&tt=%d" % (sign, int(time.time() * 1000)))
+        req = urllib.request.Request(url, headers={'User-Agent': _BAIDU_UA})
+        try:
+            resp = urllib.request.urlopen(req, timeout=30)
+            text = resp.read().decode()
+            m = re.search(r'\((.*)\)', text, re.DOTALL)
+            data = json.loads(m.group(1)) if m else json.loads(text)
+            print(f"[BaiduQR] unicast errno={data.get('errno')} channel_v={str(data.get('channel_v',''))[:100]}", flush=True)
+            if data.get('errno', -1) != 0:
+                continue
+            channel_v = data.get('channel_v', '')
+            if not channel_v:
+                continue
+            inner = json.loads(channel_v)
+            st = inner.get('status', -1)
+            print(f"[BaiduQR] inner status={st} v_len={len(inner.get('v',''))}", flush=True)
+            if st == 1:
+                # status=1: 已扫码，等待确认
+                _baidu_qr['status'] = 'scanned'
+            elif st == 0:
+                # status=0: 已确认，v 字段包含 bduss
+                _baidu_qr['status'] = 'confirming'
+                v = inner.get('v', '')
+                # v 本身就是 bduss
+                print(f"[BaiduQR] v={v[:40]}... len={len(v)}", flush=True)
+                login_result = baidu_login(v, '')
+                print(f"[BaiduQR] login result: {login_result}", flush=True)
+                if login_result.get('success'):
+                    _baidu_qr['status'] = 'success'
+                    _baidu_qr['login'] = login_result
+                else:
+                    # 回退：尝试 exchange URL
+                    exchange_url = ("https://passport.baidu.com/v3/login/main/qrbdusslogin"
+                                    "?v=%d&bduss=%s&loginVersion=v5&qrcode=1&tpl=netdisk"
+                                    "&apiver=v3&tt=%d" %
+                                    (int(time.time() * 1000), v, int(time.time() * 1000)))
+                    cj = http.cookiejar.CookieJar()
+                    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
+                    req2 = urllib.request.Request(exchange_url, headers={'User-Agent': _BAIDU_UA})
+                    try:
+                        resp2 = opener.open(req2, timeout=10)
+                        body = resp2.read().decode()
+                        print(f"[BaiduQR] exchange body={body[:200]}", flush=True)
+                    except Exception as ex:
+                        print(f"[BaiduQR] exchange error: {ex}", flush=True)
+                    bduss = stoken = ''
+                    for ck in cj:
+                        print(f"[BaiduQR] cookie: {ck.name}={ck.value[:30]}...", flush=True)
+                        if ck.name == 'BDUSS': bduss = ck.value
+                        elif ck.name == 'STOKEN': stoken = ck.value
+                    if bduss:
+                        login_result = baidu_login(bduss, stoken)
+                        _baidu_qr['status'] = 'success'
+                        _baidu_qr['login'] = login_result
+                    else:
+                        _baidu_qr['status'] = 'error'
+                        _baidu_qr['message'] = 'Failed to extract BDUSS'
+                return
+        except Exception as e:
+            print(f"[BaiduQR] poll error: {e}", flush=True)
+    if _baidu_qr.get('sign') == sign and _baidu_qr['status'] not in ('success', 'error'):
+        _baidu_qr['status'] = 'expired'
+        _baidu_qr['message'] = '二维码已过期，请重新获取'
+
+
+def baidu_qr_start():
+    """获取百度扫码登录二维码，启动后台轮询线程"""
+    url = ("https://passport.baidu.com/v2/api/getqrcode?lp=pc&qrloginfrom=pc"
+           "&apiver=v3&tpl=netdisk&tt=%d" % int(time.time() * 1000))
+    req = urllib.request.Request(url, headers={'User-Agent': _BAIDU_UA})
+    resp = urllib.request.urlopen(req, timeout=10)
+    text = resp.read().decode()
+    m = re.search(r'\((.*)\)', text, re.DOTALL)
+    data = json.loads(m.group(1)) if m else json.loads(text)
+    sign = data.get('sign', '')
+    img_url = 'https://' + data.get('imgurl', '')
+    _baidu_qr['sign'] = sign
+    _baidu_qr['status'] = 'waiting'
+    _baidu_qr['message'] = ''
+    _baidu_qr['login'] = None
+    t = threading.Thread(target=_baidu_qr_poll_loop, args=(sign,), daemon=True)
+    t.start()
+    _baidu_qr['thread'] = t
+    return {'success': True, 'sign': sign, 'imgUrl': img_url}
+
+
+def baidu_qr_poll():
+    """前端查询缓存的扫码状态（不阻塞）"""
+    st = _baidu_qr.get('status', '')
+    if not st:
+        return {'status': 'error', 'message': 'No QR session'}
+    result = {'status': st}
+    if st == 'success' and _baidu_qr.get('login'):
+        result['login'] = _baidu_qr['login']
+    if st in ('error', 'expired'):
+        result['message'] = _baidu_qr.get('message', '')
+    return result
 
 
 def baidu_logout():
@@ -462,16 +578,16 @@ def qq_switch_account():
 
 
 def get_upload_status():
-    ps = subprocess.run(['pgrep', '-f', 'BaiduPCS-Go upload'], capture_output=True, text=True)
+    ps = subprocess.run(['pgrep', '-f', 'baidu-upload.py'], capture_output=True, text=True)
     active = bool(ps.stdout.strip())
     upload_file, upload_speed, upload_progress = '', '', ''
     log_path = '/var/log/bili-upload.log'
     if os.path.exists(log_path):
         with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
             lines = f.readlines()
-        # 从近 50 行找最近一次上传事件，记录其行号
+        # 从近 2000 行找最近一次上传事件，记录其行号
         start_idx = -1
-        for i in range(len(lines) - 1, max(len(lines) - 50, -1), -1):
+        for i in range(len(lines) - 1, max(len(lines) - 2000, -1), -1):
             line = lines[i]
             if '开始上传' in line:
                 m = re.search(r'开始上传: (.+?) →', line)
@@ -486,10 +602,17 @@ def get_upload_status():
         if active:
             search_lines = lines[start_idx:] if start_idx >= 0 else lines[-200:]
             for line in reversed(search_lines):
-                m = re.search(r'↑\s+([\d.]+\s*\w+)/([\d.]+\s*\w+)\s+([\d.]+\s*\w+/s)', line)
+                # Open API 格式: [upload] 38% (1610612736/4292091291) 410/1024 slices
+                m = re.search(r'\[upload\]\s+(\d+)%\s+\((\d+)/(\d+)\)', line)
                 if m:
-                    upload_progress = f"{m.group(1)}/{m.group(2)}"
-                    upload_speed    = m.group(3)
+                    pct = m.group(1)
+                    uploaded = int(m.group(2))
+                    total = int(m.group(3))
+                    def human(b):
+                        if b >= 1073741824: return f"{b/1073741824:.2f} GB"
+                        if b >= 1048576: return f"{b/1048576:.1f} MB"
+                        return f"{b/1024:.0f} KB"
+                    upload_progress = f"{human(uploaded)}/{human(total)}"
                     break
     return {'active': active, 'file': upload_file,
             'speed': upload_speed, 'progress': upload_progress}
@@ -678,6 +801,18 @@ class StatusHandler(BaseHTTPRequestHandler):
             except Exception as e:
                 _json_response(self, {'success': False, 'message': str(e)}, 400)
 
+        elif self.path == '/api/baidu-qr-start':
+            try:
+                _json_response(self, baidu_qr_start())
+            except Exception as e:
+                _json_response(self, {'success': False, 'message': str(e)}, 500)
+
+        elif self.path == '/api/baidu-qr-poll':
+            try:
+                _json_response(self, baidu_qr_poll())
+            except Exception as e:
+                _json_response(self, {'status': 'error', 'message': str(e)}, 500)
+
         elif self.path == '/api/baidu-logout':
             _json_response(self, baidu_logout())
 
@@ -796,6 +931,8 @@ class StatusHandler(BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     threading.Thread(target=_poll_live, daemon=True).start()
-    server = HTTPServer(('127.0.0.1', 2234), StatusHandler)
+    class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+        daemon_threads = True
+    server = ThreadedHTTPServer(('127.0.0.1', 2234), StatusHandler)
     print('状态 API 启动在 127.0.0.1:2234')
     server.serve_forever()
