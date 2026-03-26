@@ -103,6 +103,8 @@ inotifywait -m -r -e close_write --format '%w%f' "$WATCH_DIR" | while read FILE;
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] 上传失败，保留本地文件: $FILE" >> "$LOG"
         fi
     elif [[ "$EXT" == "xml" ]]; then
+        # xml 文件可能已被视频上传流程一并处理并删除
+        if [ ! -f "$FILE" ]; then continue; fi
         VIDEO_LOCAL="${FILE%.*}.flv"
         if [ ! -f "$VIDEO_LOCAL" ]; then
             parse_target "$FILE"

@@ -127,22 +127,21 @@ def upload_file(local_path, remote_path):
     with open(local_path, 'rb') as f:
         for i in range(num_slices):
             chunk = f.read(SLICE_SIZE)
-            for attempt in range(3):
+            for attempt in range(5):
                 try:
                     result = upload_slice(cfg, upload_id, i, chunk)
                     if 'md5' in result:
                         uploaded = min((i + 1) * SLICE_SIZE, file_size)
                         pct = int(100 * uploaded / file_size)
-                        speed_mb = SLICE_SIZE / 1024 / 1024
                         print(f"[upload] {pct}% ({uploaded}/{file_size}) {i+1}/{num_slices} slices", flush=True)
                         break
                     else:
                         print(f"[upload] slice {i} unexpected: {result}", file=sys.stderr, flush=True)
                 except Exception as e:
                     print(f"[upload] slice {i} error (attempt {attempt+1}): {e}", file=sys.stderr, flush=True)
-                    if attempt == 2:
+                    if attempt == 4:
                         return False
-                    time.sleep(5)
+                    time.sleep(5 * (attempt + 1))
 
     # 4. 合并创建
     result = create_file(cfg, remote_path, file_size, upload_id, block_md5_list)
