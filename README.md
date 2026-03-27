@@ -4,11 +4,12 @@ B站直播自动录制 + 百度云上传 + QQ 机器人通知，适合部署在 
 
 ## 功能
 
-- **自动录播**：基于 [BililiveRecorder](https://github.com/BililiveRecorder/BililiveRecorder)，支持多直播间、弹幕录制
-- **自动上传百度云**：录制完成后自动上传，验证文件完整后删除本地文件
-- **QQ 通知**：开播/下播时通过 [NapCat](https://github.com/NapNeko/NapCatQQ) 发送 QQ 消息
-- **状态监控页面**：Web 界面实时查看磁盘、上传、QQ 机器人状态
-- **房间管理**：Web 界面添加/删除直播间、开关录制、更新 Cookie
+- **自动录播**：基于 [BililiveRecorder](https://github.com/BililiveRecorder/BililiveRecorder)，支持多直播间同时录制、弹幕录制、4GB 自动分段
+- **自动上传百度云**：录制完成后通过百度网盘 Open API 分片上传，支持断点重试，验证文件完整后自动清理本地文件
+- **QQ 通知**：开播/下播时通过 [NapCat](https://github.com/NapNeko/NapCatQQ) 发送 QQ 私聊/群消息，支持按房间订阅
+- **Web 状态监控**：实时查看磁盘用量、上传队列、QQ 机器人状态，支持登录认证
+- **Web 房间管理**：添加/删除直播间、开关录制、更新 B站 Cookie，房间配置持久化
+- **通知管理**：Web 界面配置 QQ 通知对象和订阅房间
 
 ## 一键部署
 
@@ -23,7 +24,6 @@ sudo bash install.sh
 安装脚本会自动完成：
 - 安装系统依赖（inotify-tools、nginx、python3、xvfb 等）
 - 下载安装 BililiveRecorder CLI
-- 下载安装 BaiduPCS-Go
 - 可选安装 NapCat QQ 机器人（交互式选择）
 - 部署脚本、服务、网页、nginx 配置
 - 可选检测并挂载数据盘
@@ -50,19 +50,23 @@ nano /usr/local/bin/bili-status.py
 
 修改顶部的 `BREC_USER`、`BREC_PASS`（与上一步一致），以及 `NAPCAT_TOKEN`（NapCat WebUI Token）。
 
-### 3. 启动录播服务
+### 3. 配置百度网盘 Open API
+
+上传已从 BaiduPCS-Go 迁移至百度网盘 Open API，需要配置 access token：
+
+```bash
+nano /usr/local/bin/baidu-upload.py
+```
+
+在顶部填写 `APP_KEY`、`SECRET_KEY`、`ACCESS_TOKEN`、`REFRESH_TOKEN`。Token 可通过 [百度网盘开放平台](https://pan.baidu.com/union/doc/ol0rsap9s) 申请获取。
+
+### 4. 启动服务
 
 ```bash
 systemctl enable --now brec
+systemctl enable --now bili-upload
+systemctl enable --now bili-status
 ```
-
-### 4. 登录百度云
-
-```bash
-BaiduPCS-Go login -bduss=YOUR_BDUSS -stoken=YOUR_STOKEN
-```
-
-从浏览器 Cookie 中获取 BDUSS 和 STOKEN。
 
 ### 5. （可选）启动 QQ 机器人
 
@@ -78,14 +82,19 @@ systemctl enable --now napcat
 http://YOUR_SERVER_IP
 ```
 
+首次访问需设置登录密码。
+
 ## 目录结构
 
 ```
 bili-rec-server/
 ├── scripts/
 │   ├── bili-status.py        # 状态 API 服务（端口 2234）
-│   ├── bili-upload.sh        # 文件监控 + 百度云上传
+│   ├── bili-upload.sh        # inotify 文件监控 + 上传调度
+│   ├── baidu-upload.py       # 百度网盘 Open API 上传（分片 + 重试）
 │   ├── brec-start.sh         # BililiveRecorder 启动脚本（需填写配置）
+│   ├── brec-add-rooms.sh     # 批量添加直播间
+│   ├── brec-save-rooms.sh    # 持久化房间配置
 │   └── napcat-restart.sh     # NapCat 重启辅助脚本
 ├── services/
 │   ├── brec.service          # 录播姬 systemd 服务
@@ -111,6 +120,7 @@ bili-rec-server/
 | 上传日志 | `/var/log/bili-upload.log` |
 | 通知配置 | `/etc/bili-notify.json` |
 | 录制开关 | `/etc/bili-record.json` |
+| 认证配置 | `/etc/bili-auth.json` |
 
 ## 通知配置
 
@@ -128,6 +138,15 @@ bili-rec-server/
 ```
 
 `rooms` 为空数组表示接收所有房间的通知。
+
+## 上传机制
+
+- 使用百度网盘 Open API 分片上传（4MB/片）
+- 分片上传失败自动重试 5 次，退避时间递增
+- 合并创建文件失败自动重试 5 次
+- 上传完成后验证远端文件大小（带重试，应对百度索引延迟）
+- 验证通过后自动删除本地文件
+- 弹幕 XML 文件与视频文件一同上传
 
 ## License
 
