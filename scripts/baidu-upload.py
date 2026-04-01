@@ -12,6 +12,7 @@ import urllib.error
 
 CONFIG_PATH = "/etc/baidu-openapi.json"
 SLICE_SIZE = 4 * 1024 * 1024  # 4MB per slice
+RESUME_DIR = "/tmp/baidu-upload-resume"
 
 def load_config():
     with open(CONFIG_PATH) as f:
@@ -103,29 +104,74 @@ def create_file(cfg, remote_path, file_size, upload_id, block_md5_list):
     }).encode()
     return api_request('https://pan.baidu.com/rest/2.0/xpan/file?method=create', cfg, data=data, method='POST')
 
+def get_resume_path(local_path):
+    """获取断点续传状态文件路径"""
+    os.makedirs(RESUME_DIR, exist_ok=True)
+    name = hashlib.md5(local_path.encode()).hexdigest()
+    return os.path.join(RESUME_DIR, f"{name}.json")
+
+def load_resume(local_path):
+    """加载断点续传状态"""
+    path = get_resume_path(local_path)
+    if os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return None
+
+def save_resume(local_path, state):
+    """保存断点续传状态"""
+    path = get_resume_path(local_path)
+    with open(path, 'w') as f:
+        json.dump(state, f)
+
+def clear_resume(local_path):
+    """清除断点续传状态"""
+    path = get_resume_path(local_path)
+    if os.path.exists(path):
+        os.remove(path)
+
 def upload_file(local_path, remote_path):
-    """上传文件到百度网盘"""
+    """上传文件到百度网盘（支持断点续传）"""
     cfg = load_config()
     file_size = os.path.getsize(local_path)
     num_slices = max(1, math.ceil(file_size / SLICE_SIZE))
 
-    # 1. 计算分片 MD5
-    block_md5_list = []
-    with open(local_path, 'rb') as f:
-        for i in range(num_slices):
-            chunk = f.read(SLICE_SIZE)
-            block_md5_list.append(hashlib.md5(chunk).hexdigest())
+    # 尝试恢复上次的上传状态
+    resume = load_resume(local_path)
+    if resume and resume.get('remote_path') == remote_path and resume.get('file_size') == file_size:
+        upload_id = resume['upload_id']
+        block_md5_list = resume['block_md5_list']
+        start_slice = resume.get('completed_slices', 0)
+        print(f"[upload] 恢复上传，从分片 {start_slice}/{num_slices} 继续", flush=True)
+    else:
+        start_slice = 0
+        # 1. 计算分片 MD5
+        block_md5_list = []
+        with open(local_path, 'rb') as f:
+            for i in range(num_slices):
+                chunk = f.read(SLICE_SIZE)
+                block_md5_list.append(hashlib.md5(chunk).hexdigest())
 
-    # 2. 预创建
-    pre = precreate(cfg, remote_path, file_size, block_md5_list)
-    if pre.get('errno') != 0:
-        print(f"precreate failed: {pre}", file=sys.stderr, flush=True)
-        return False
-    upload_id = pre['uploadid']
+        # 2. 预创建
+        pre = precreate(cfg, remote_path, file_size, block_md5_list)
+        if pre.get('errno') != 0:
+            print(f"precreate failed: {pre}", file=sys.stderr, flush=True)
+            return False
+        upload_id = pre['uploadid']
+
+        # 保存初始状态
+        save_resume(local_path, {
+            'remote_path': remote_path,
+            'file_size': file_size,
+            'upload_id': upload_id,
+            'block_md5_list': block_md5_list,
+            'completed_slices': 0,
+        })
 
     # 3. 上传分片
     with open(local_path, 'rb') as f:
-        for i in range(num_slices):
+        f.seek(start_slice * SLICE_SIZE)
+        for i in range(start_slice, num_slices):
             chunk = f.read(SLICE_SIZE)
             for attempt in range(5):
                 try:
@@ -134,23 +180,40 @@ def upload_file(local_path, remote_path):
                         uploaded = min((i + 1) * SLICE_SIZE, file_size)
                         pct = int(100 * uploaded / file_size)
                         print(f"[upload] {pct}% ({uploaded}/{file_size}) {i+1}/{num_slices} slices", flush=True)
+                        # 每 10 个分片保存一次进度
+                        if (i + 1) % 10 == 0 or i + 1 == num_slices:
+                            save_resume(local_path, {
+                                'remote_path': remote_path,
+                                'file_size': file_size,
+                                'upload_id': upload_id,
+                                'block_md5_list': block_md5_list,
+                                'completed_slices': i + 1,
+                            })
                         break
                     else:
                         print(f"[upload] slice {i} unexpected: {result}", file=sys.stderr, flush=True)
                 except Exception as e:
                     print(f"[upload] slice {i} error (attempt {attempt+1}): {e}", file=sys.stderr, flush=True)
                     if attempt == 4:
+                        print(f"[upload] 分片 {i} 失败5次，进度已保存，下次可续传", file=sys.stderr, flush=True)
                         return False
                     time.sleep(5 * (attempt + 1))
 
-    # 4. 合并创建
-    result = create_file(cfg, remote_path, file_size, upload_id, block_md5_list)
-    if result.get('errno') == 0:
-        print(f"[upload] OK: {remote_path} size={result.get('size',0)}", flush=True)
-        return True
-    else:
-        print(f"[upload] create failed: {result}", file=sys.stderr, flush=True)
-        return False
+    # 4. 合并创建（带重试）
+    for attempt in range(5):
+        try:
+            result = create_file(cfg, remote_path, file_size, upload_id, block_md5_list)
+            if result.get('errno') == 0:
+                print(f"[upload] OK: {remote_path} size={result.get('size',0)}", flush=True)
+                clear_resume(local_path)
+                return True
+            else:
+                print(f"[upload] create failed (attempt {attempt+1}): {result}", file=sys.stderr, flush=True)
+        except Exception as e:
+            print(f"[upload] create error (attempt {attempt+1}): {e}", file=sys.stderr, flush=True)
+        if attempt < 4:
+            time.sleep(10 * (attempt + 1))
+    return False
 
 def list_dir(remote_dir):
     """列出远端目录"""

@@ -57,11 +57,16 @@ baidu_upload() {
         return 1
     fi
 
-    # 验证远端文件存在且大小与本地一致
+    # 验证远端文件存在且大小与本地一致（百度索引有延迟，重试 3 次）
     local LOCAL_SIZE
     LOCAL_SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
-    local REMOTE_SIZE
-    REMOTE_SIZE=$(python3 /usr/local/bin/baidu-upload.py --size "$REMOTE_DIR" "$REMOTE_NAME" 2>/dev/null)
+    local REMOTE_SIZE=""
+    for _try in 1 2 3; do
+        REMOTE_SIZE=$(python3 /usr/local/bin/baidu-upload.py --size "$REMOTE_DIR" "$REMOTE_NAME" 2>/dev/null)
+        if [ -n "$REMOTE_SIZE" ] && [ "$REMOTE_SIZE" -gt 0 ] 2>/dev/null; then break; fi
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] 验证等待：远端索引未就绪，${_try}/3 (10s后重试)" >> "$LOG"
+        sleep 10
+    done
     if [ -z "$REMOTE_SIZE" ] || [ "$REMOTE_SIZE" -lt 0 ] 2>/dev/null; then
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 验证失败：远端文件不存在: $REMOTE_PATH" >> "$LOG"
         return 1
@@ -86,7 +91,19 @@ inotifywait -m -r -e close_write --format '%w%f' "$WATCH_DIR" | while read FILE;
         FILE_SIZE=$(stat -c%s "$FILE" 2>/dev/null || echo 0)
         parse_target "$FILE"
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 开始上传: $FILE → $REMOTE_DIR/$REMOTE_NAME ($(($FILE_SIZE / 1024 / 1024))MB)" >> "$LOG"
-        if baidu_upload "$FILE" "$REMOTE_DIR" "$REMOTE_NAME"; then
+        UPLOAD_OK=false
+        for ATTEMPT in 1 2 3; do
+            if baidu_upload "$FILE" "$REMOTE_DIR" "$REMOTE_NAME"; then
+                UPLOAD_OK=true
+                break
+            fi
+            if [ $ATTEMPT -lt 3 ]; then
+                WAIT=$((ATTEMPT * 60))
+                echo "[$(date '+%Y-%m-%d %H:%M:%S')] 上传失败，第${ATTEMPT}次重试将在${WAIT}秒后开始: $REMOTE_NAME" >> "$LOG"
+                sleep $WAIT
+            fi
+        done
+        if $UPLOAD_OK; then
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] 上传成功，删除本地文件: $FILE" >> "$LOG"
             rm -f "$FILE"
             XML="${FILE%.*}.xml"
@@ -100,7 +117,7 @@ inotifywait -m -r -e close_write --format '%w%f' "$WATCH_DIR" | while read FILE;
                 fi
             fi
         else
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 上传失败，保留本地文件: $FILE" >> "$LOG"
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] 上传失败（已重试3次），保留本地文件: $FILE" >> "$LOG"
         fi
     elif [[ "$EXT" == "xml" ]]; then
         # xml 文件可能已被视频上传流程一并处理并删除
