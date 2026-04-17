@@ -462,16 +462,33 @@ def get_napcat_status():
 
 def refresh_qrcode(cred):
     before = get_qrcode_meta()
-    result = _napcat_post("/api/QQLogin/RefreshQRcode", cred)
-    time.sleep(0.6)
-    after = get_qrcode_meta()
-    changed = bool(after and (not before or before.get("mtime") != after.get("mtime") or before.get("size") != after.get("size")))
+    refresh_result = _napcat_post("/api/QQLogin/RefreshQRcode", cred)
+    # NapCat's refresh callback returns before the QR image is necessarily
+    # written to disk, so actively request the latest QR code and wait a bit.
+    get_result = _napcat_post("/api/QQLogin/GetQQLoginQrcode", cred)
+    after = None
+    changed = False
+    for _ in range(12):
+        time.sleep(0.5)
+        after = get_qrcode_meta()
+        if after and (not before or before.get("mtime") != after.get("mtime") or before.get("size") != after.get("size")):
+            changed = True
+            break
+    if after is None:
+        after = get_qrcode_meta()
     return {
-        "upstream": result,
+        "upstream": refresh_result,
+        "get_qrcode": get_result,
+        "qrcode_url": (get_result.get("data") or {}).get("qrcode", ""),
         "before": before,
         "after": after,
         "changed": changed,
     }
+
+
+def get_napcat_qrcode_url(cred):
+    result = _napcat_post("/api/QQLogin/GetQQLoginQrcode", cred)
+    return (result.get("data") or {}).get("qrcode", "")
 
 
 def get_qrcode_meta():
@@ -984,12 +1001,20 @@ class StatusHandler(BaseHTTPRequestHandler):
 
         if self.path == '/api/status':
             napcat = get_napcat_status()
+            qrcode_url = ""
+            if napcat.get('running') and not napcat.get('logged_in') and napcat.get('_cred'):
+                qrcode_url = get_napcat_qrcode_url(napcat['_cred'])
             cookie_str = get_brec_cookie()
             cookie_fields = parse_cookie_fields(cookie_str)
             _json_response(self, {
                 'disk':   get_disk_info(),
                 'upload': get_upload_status(),
-                'napcat': {'running': napcat['running'], 'logged_in': napcat['logged_in'], 'token': napcat.get('token', '')},
+                'napcat': {
+                    'running': napcat['running'],
+                    'logged_in': napcat['logged_in'],
+                    'token': napcat.get('token', ''),
+                    'qrcode_url': qrcode_url,
+                },
                 'baidu':  get_baidu_status(),
                 'notify': load_notify_config(),
                 'brec_cookie': {
@@ -1020,13 +1045,15 @@ class StatusHandler(BaseHTTPRequestHandler):
                         'message': '二维码已刷新',
                         'changed': True,
                         'qrcode': refresh.get('after'),
+                        'qrcode_url': refresh.get('qrcode_url', ''),
                     })
                 elif upstream_ok:
                     _json_response(self, {
                         'code': 0,
-                        'message': '已请求刷新二维码，但图片文件暂未变化，请稍后重试',
+                        'message': '已请求刷新二维码，页面将使用最新登录链接重新生成二维码',
                         'changed': False,
                         'qrcode': refresh.get('after'),
+                        'qrcode_url': refresh.get('qrcode_url', ''),
                     })
                 else:
                     _json_response(self, {
@@ -1034,6 +1061,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                         'message': 'NapCat 已收到刷新请求，但未返回成功结果',
                         'changed': changed,
                         'qrcode': refresh.get('after'),
+                        'qrcode_url': refresh.get('qrcode_url', ''),
                         'upstream': upstream,
                     }, 502)
             else:

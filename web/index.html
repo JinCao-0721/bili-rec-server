@@ -19,6 +19,7 @@
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
 </head>
 <body class="text-white min-h-screen">
 <div id="root"></div>
@@ -47,6 +48,32 @@ function IcoRefresh() {
       <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
     </svg>
   );
+}
+
+function QRCodePreview(props) {
+  const value = props.value || '';
+  const size = props.size || 96;
+  const boxRef = useRef(null);
+
+  useEffect(function() {
+    const box = boxRef.current;
+    if (!box) return;
+    box.innerHTML = '';
+    if (!value || typeof qrcode !== 'function') return;
+    const qr = qrcode(0, 'M');
+    qr.addData(value);
+    qr.make();
+    box.innerHTML = qr.createImgTag(4, 2);
+    const img = box.querySelector('img');
+    if (img) {
+      img.style.width = size + 'px';
+      img.style.height = size + 'px';
+      img.style.display = 'block';
+      img.style.imageRendering = 'pixelated';
+    }
+  }, [value, size]);
+
+  return <div ref={boxRef} style={{ width: size, height: size }} className="flex items-center justify-center" />;
 }
 /* ── Utilities ─────────────────────────────────────────────── */
 function fmtBytes(b) {
@@ -336,6 +363,7 @@ function QQBotSection(props) {
   const running   = data && data.running;
   const loggedIn  = data && data.logged_in;
   const token     = data && data.token;
+  const qrcodeUrl = data && data.qrcode_url;
   const needQR    = running && !loggedIn;
 
   const [countdown,  setCountdown] = useState(150);
@@ -374,6 +402,7 @@ function QQBotSection(props) {
         setRefreshMsg('刷新失败：' + ((d && d.message) || '未知错误'));
         return;
       }
+      if (props.onRefreshQrcode && d.qrcode_url) props.onRefreshQrcode(d.qrcode_url);
       setImgKey(Date.now());
       setRefreshMsg(d.message || '二维码已刷新');
       startCountdown();
@@ -419,8 +448,10 @@ function QQBotSection(props) {
     <div className="flex gap-4 items-start">
         {needQR && (
           <div className="bg-white rounded-xl p-1.5 flex-shrink-0">
-            <img src={'/qrcode.png?t=' + imgKey} alt="QQ 登录二维码"
-              className="w-24 h-24 block" style={{ imageRendering: 'pixelated' }} />
+            {qrcodeUrl
+              ? <QRCodePreview value={qrcodeUrl} size={96} />
+              : <img src={'/qrcode.png?t=' + imgKey} alt="QQ 登录二维码"
+                  className="w-24 h-24 block" style={{ imageRendering: 'pixelated' }} />}
           </div>
         )}
         <div className="flex-1 min-w-0">
@@ -433,7 +464,7 @@ function QQBotSection(props) {
             <p className="text-xs text-white/25 mt-1 font-mono">Token: {token}</p>
           )}
           {needQR && (
-            <p className="text-xs text-white/25 mt-1.5">二维码将在 {countdown} 秒后自动刷新</p>
+            <p className="text-xs text-white/25 mt-1.5">二维码将在 {countdown} 秒后自动刷新{qrcodeUrl ? '（当前为实时登录链接生成）' : ''}</p>
           )}
           <div className="flex gap-2 mt-3">
             {needQR && (
@@ -893,7 +924,12 @@ function App() {
 
             <div className="bg-white/[0.06] backdrop-blur-xl border border-white/[0.08] rounded-3xl p-5">
               <SectionTitle>QQ 机器人</SectionTitle>
-              <QQBotSection data={napcat} />
+              <QQBotSection data={napcat} onRefreshQrcode={function(url) {
+                setStatus(function(prev) {
+                  if (!prev) return prev;
+                  return { ...prev, napcat: { ...(prev.napcat || {}), qrcode_url: url } };
+                });
+              }} />
             </div>
           </div>
 
