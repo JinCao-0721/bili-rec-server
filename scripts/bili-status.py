@@ -16,8 +16,10 @@ from datetime import datetime
 
 NAPCAT_PORT = 6099
 NAPCAT_TOKEN = "your_napcat_token"
+NAPCAT_WEBUI_CONFIG_PATH = "/root/Napcat/opt/QQ/resources/app/app_launcher/napcat/config/webui.json"
 ONEBOT_URL = "http://127.0.0.1:5700"
 NAPCAT_TIMEOUT = 8
+NAPCAT_QRCODE_PATH = "/root/Napcat/opt/QQ/resources/app/app_launcher/napcat/cache/qrcode.png"
 NOTIFY_CONFIG_PATH = "/etc/bili-notify.json"
 RECORD_CONFIG_PATH = "/etc/bili-record.json"
 AUTH_CONFIG_PATH = "/etc/bili-auth.json"
@@ -36,6 +38,14 @@ _RECORDING_GRACE = 5       # 秒：recording 变 False 后宽限期，避免切�
 # ── 直播状态轮询（推送逻辑，与录制完全解耦）────────────────────
 _live_status = {}   # room_id -> bool，上次已知直播状态
 _live_lock   = threading.Lock()
+
+
+def _load_napcat_webui_config():
+    try:
+        with open(NAPCAT_WEBUI_CONFIG_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
 def _bilibili_live_status(room_id):
@@ -124,6 +134,8 @@ def _validate_session(cookie_header):
     if time.time() - sess["ts"] > _SESSION_TTL:
         _sessions.pop(token, None)
         return False
+    # Sliding expiration: keep active sessions alive while the page is in use.
+    sess["ts"] = time.time()
     return True
 
 
@@ -196,8 +208,22 @@ def save_notify_config(cfg):
 
 # ── BililiveRecorder 房间管理 ────────────────────────────────
 
+def _resolve_brec_auth():
+    try:
+        with open(BREC_START_SH, 'r', encoding='utf-8') as f:
+            text = f.read()
+        user_match = re.search(r'--http-basic-user\s+([^\s\\]+)', text)
+        pass_match = re.search(r'--http-basic-pass\s+([^\s\\]+)', text)
+        if user_match and pass_match:
+            return user_match.group(1), pass_match.group(1)
+    except Exception:
+        pass
+    return BREC_USER, BREC_PASS
+
+
 def _brec_request(path, method="GET", data=None):
-    auth = base64.b64encode(f"{BREC_USER}:{BREC_PASS}".encode()).decode()
+    brec_user, brec_pass = _resolve_brec_auth()
+    auth = base64.b64encode(f"{brec_user}:{brec_pass}".encode()).decode()
     headers = {"Authorization": f"Basic {auth}"}
     if data is not None:
         headers["Content-Type"] = "application/json"
@@ -283,6 +309,7 @@ def set_brec_cookie(cookie_str):
     query = ('mutation { setConfig(config: { optionalCookie: '
              '{ hasValue: true, value: "' + escaped + '" } }) '
              '{ optionalCookie { hasValue value } } }')
+    brec_user, brec_pass = _resolve_brec_auth()
     data = json.dumps({"query": query}).encode()
     req = urllib.request.Request(
         f'{BREC_URL}/graphql',
@@ -290,7 +317,7 @@ def set_brec_cookie(cookie_str):
         headers={
             'Content-Type': 'application/json',
             'Authorization': 'Basic ' + base64.b64encode(
-                f'{BREC_USER}:{BREC_PASS}'.encode()).decode(),
+                f'{brec_user}:{brec_pass}'.encode()).decode(),
         },
     )
     urllib.request.urlopen(req, timeout=10)
@@ -343,9 +370,13 @@ def brec_remove_room(object_id):
 # ── NapCat ───────────────────────────────────────────────────
 
 def _napcat_credential():
-    h = hashlib.sha256((NAPCAT_TOKEN + ".napcat").encode()).hexdigest()
+    port = _resolve_napcat_port()
+    token = _resolve_napcat_token()
+    if not token:
+        return ""
+    h = hashlib.sha256((token + ".napcat").encode()).hexdigest()
     req = urllib.request.Request(
-        f"http://127.0.0.1:{NAPCAT_PORT}/api/auth/login",
+        f"http://127.0.0.1:{port}/api/auth/login",
         data=json.dumps({"hash": h}).encode(),
         headers={"Content-Type": "application/json"},
         method="POST"
@@ -358,9 +389,49 @@ def _napcat_credential():
         return ""
 
 
+def _resolve_napcat_token():
+    data = _load_napcat_webui_config()
+    token = str(data.get("token", "")).strip()
+    if token:
+        return token
+    return NAPCAT_TOKEN if NAPCAT_TOKEN != "your_napcat_token" else ""
+
+
+def _resolve_napcat_port():
+    data = _load_napcat_webui_config()
+    try:
+        port = int(data.get("port", 0))
+        if port > 0:
+            return port
+    except Exception:
+        pass
+    return NAPCAT_PORT
+
+
+def _is_napcat_process_running():
+    commands = [
+        ['systemctl', 'is-active', 'napcat'],
+        ['pgrep', '-af', '/root/Napcat/opt/QQ/qq'],
+        ['pgrep', '-af', 'Napcat'],
+        ['pgrep', '-af', 'napcat'],
+    ]
+    for cmd in commands:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if cmd[:2] == ['systemctl', 'is-active']:
+                if result.returncode == 0 and result.stdout.strip() == 'active':
+                    return True
+            elif result.stdout.strip():
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _napcat_post(path, cred):
+    port = _resolve_napcat_port()
     req = urllib.request.Request(
-        f"http://127.0.0.1:{NAPCAT_PORT}{path}",
+        f"http://127.0.0.1:{port}{path}",
         data=b"{}",
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {cred}"},
         method="POST"
@@ -378,19 +449,42 @@ def get_napcat_status():
     if _napcat_cache["data"] is not None and now - _napcat_cache["ts"] < _CACHE_TTL:
         return _napcat_cache["data"]
     cred = _napcat_credential()
+    token = _resolve_napcat_token()
     if not cred:
-        ps = subprocess.run(['pgrep', '-f', 'napcat'], capture_output=True, text=True)
-        result = {"running": bool(ps.stdout.strip()), "logged_in": False}
+        result = {"running": _is_napcat_process_running(), "logged_in": False, "token": token}
     else:
         d = _napcat_post("/api/QQLogin/CheckLoginStatus", cred)
         is_login = d.get("data", {}).get("isLogin", False)
-        result = {"running": True, "logged_in": is_login, "_cred": cred}
+        result = {"running": True, "logged_in": is_login, "_cred": cred, "token": token}
     _napcat_cache = {"ts": now, "data": result}
     return result
 
 
 def refresh_qrcode(cred):
-    _napcat_post("/api/QQLogin/RefreshQRcode", cred)
+    before = get_qrcode_meta()
+    result = _napcat_post("/api/QQLogin/RefreshQRcode", cred)
+    time.sleep(0.6)
+    after = get_qrcode_meta()
+    changed = bool(after and (not before or before.get("mtime") != after.get("mtime") or before.get("size") != after.get("size")))
+    return {
+        "upstream": result,
+        "before": before,
+        "after": after,
+        "changed": changed,
+    }
+
+
+def get_qrcode_meta():
+    try:
+        st = os.stat(NAPCAT_QRCODE_PATH)
+        return {
+            "path": NAPCAT_QRCODE_PATH,
+            "size": st.st_size,
+            "mtime": st.st_mtime,
+            "mtime_iso": datetime.fromtimestamp(st.st_mtime).isoformat(),
+        }
+    except Exception:
+        return None
 
 
 # ── 系统状态 ─────────────────────────────────────────────────
@@ -895,7 +989,7 @@ class StatusHandler(BaseHTTPRequestHandler):
             _json_response(self, {
                 'disk':   get_disk_info(),
                 'upload': get_upload_status(),
-                'napcat': {'running': napcat['running'], 'logged_in': napcat['logged_in'], 'token': NAPCAT_TOKEN},
+                'napcat': {'running': napcat['running'], 'logged_in': napcat['logged_in'], 'token': napcat.get('token', '')},
                 'baidu':  get_baidu_status(),
                 'notify': load_notify_config(),
                 'brec_cookie': {
@@ -916,8 +1010,32 @@ class StatusHandler(BaseHTTPRequestHandler):
         elif self.path == '/api/refresh-qrcode':
             napcat = get_napcat_status()
             if napcat.get('_cred'):
-                refresh_qrcode(napcat['_cred'])
-                _json_response(self, {'code': 0, 'message': 'ok'})
+                refresh = refresh_qrcode(napcat['_cred'])
+                upstream = refresh.get('upstream') or {}
+                upstream_ok = upstream.get('status') == 'ok' or upstream.get('code') in (0, 200)
+                changed = refresh.get('changed') is True
+                if upstream_ok and changed:
+                    _json_response(self, {
+                        'code': 0,
+                        'message': '二维码已刷新',
+                        'changed': True,
+                        'qrcode': refresh.get('after'),
+                    })
+                elif upstream_ok:
+                    _json_response(self, {
+                        'code': 0,
+                        'message': '已请求刷新二维码，但图片文件暂未变化，请稍后重试',
+                        'changed': False,
+                        'qrcode': refresh.get('after'),
+                    })
+                else:
+                    _json_response(self, {
+                        'code': -1,
+                        'message': 'NapCat 已收到刷新请求，但未返回成功结果',
+                        'changed': changed,
+                        'qrcode': refresh.get('after'),
+                        'upstream': upstream,
+                    }, 502)
             else:
                 _json_response(self, {'code': -1, 'message': 'napcat not running'})
 
