@@ -10,6 +10,8 @@ import time
 import threading
 import http.cookiejar
 import urllib.request
+import urllib.parse
+import urllib.error
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 from datetime import datetime
@@ -34,10 +36,63 @@ _baidu_cache  = {"ts": 0, "data": None}
 _CACHE_TTL = 10
 _recording_last_true = {}  # room_id -> timestamp，上次 recording=True 的时间
 _RECORDING_GRACE = 5       # 秒：recording 变 False 后宽限期，避免切片间隙闪烁
+_napcat_recovery = {
+    "active": False,
+    "attempt": 0,
+    "max_attempts": 2,
+    "need_manual_login": False,
+    "last_state": "idle",
+    "message": "",
+    "updated_at": 0,
+}
+_napcat_recovery_lock = threading.Lock()
+_napcat_last_login_seen = None
 
 # ── 直播状态轮询（推送逻辑，与录制完全解耦）────────────────────
 _live_status = {}   # room_id -> bool，上次已知直播状态
 _live_lock   = threading.Lock()
+
+
+def _baidu_openapi_refresh(cfg):
+    data = urllib.parse.urlencode({
+        'grant_type': 'refresh_token',
+        'refresh_token': cfg['refresh_token'],
+        'client_id': cfg['app_key'],
+        'client_secret': cfg['secret_key'],
+    }).encode()
+    req = urllib.request.Request('https://openapi.baidu.com/oauth/2.0/token', data=data)
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        result = json.loads(resp.read().decode())
+    if 'access_token' not in result:
+        raise RuntimeError('Baidu OpenAPI token refresh failed')
+    cfg['access_token'] = result['access_token']
+    cfg['refresh_token'] = result.get('refresh_token', cfg.get('refresh_token', ''))
+    cfg['expires_in'] = result.get('expires_in', cfg.get('expires_in', 0))
+    with open('/etc/baidu-openapi.json', 'w') as f:
+        json.dump(cfg, f, indent=2)
+    return cfg
+
+
+def _baidu_openapi_uinfo(cfg, retry=True):
+    token = cfg.get('access_token', '')
+    req = urllib.request.Request(
+        f"https://pan.baidu.com/rest/2.0/xpan/nas?method=uinfo&access_token={token}"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        payload = {}
+        try:
+            payload = json.loads(e.read().decode())
+        except Exception:
+            pass
+        if retry and payload.get('errno') == -6:
+            return _baidu_openapi_uinfo(_baidu_openapi_refresh(cfg), retry=False)
+        raise
+    if retry and data.get('errno') == -6:
+        return _baidu_openapi_uinfo(_baidu_openapi_refresh(cfg), retry=False)
+    return data
 
 
 def _load_napcat_webui_config():
@@ -443,19 +498,149 @@ def _napcat_post(path, cred):
         return {}
 
 
+def _napcat_recovery_snapshot():
+    with _napcat_recovery_lock:
+        return dict(_napcat_recovery)
+
+
+def _napcat_recovery_update(**kwargs):
+    with _napcat_recovery_lock:
+        _napcat_recovery.update(kwargs)
+        _napcat_recovery["updated_at"] = time.time()
+
+
+def _napcat_restart_service():
+    proc = subprocess.run(
+        ["systemctl", "restart", "napcat"],
+        capture_output=True,
+        text=True,
+        timeout=30
+    )
+    return {
+        "ok": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "stdout": proc.stdout[-300:],
+        "stderr": proc.stderr[-300:],
+    }
+
+
+def _napcat_probe_status_once():
+    cred = _napcat_credential()
+    token = _resolve_napcat_token()
+    if not cred:
+        return {
+            "running": _is_napcat_process_running(),
+            "logged_in": False,
+            "_cred": "",
+            "token": token,
+        }
+    d = _napcat_post("/api/QQLogin/CheckLoginStatus", cred)
+    is_login = d.get("data", {}).get("isLogin", False)
+    return {
+        "running": True,
+        "logged_in": is_login,
+        "_cred": cred,
+        "token": token,
+    }
+
+
+def _napcat_auto_recover_worker():
+    global _napcat_cache
+    for attempt in range(1, 3):
+        _napcat_recovery_update(
+            active=True,
+            attempt=attempt,
+            last_state="recovering",
+            message=f"检测到掉线，正在尝试自动恢复（第 {attempt}/2 次）…",
+            need_manual_login=False,
+        )
+        restart = _napcat_restart_service()
+        if not restart["ok"]:
+            _napcat_recovery_update(
+                active=False,
+                attempt=attempt,
+                last_state="failed",
+                message=f"自动恢复失败：重启 NapCat 失败（第 {attempt}/2 次）",
+                need_manual_login=(attempt >= 2),
+            )
+            if attempt >= 2:
+                return
+            time.sleep(1)
+            continue
+
+        _napcat_recovery_update(
+            active=True,
+            attempt=attempt,
+            last_state="waiting_check",
+            message=f"NapCat 已重启，等待 30 秒后复查登录状态（第 {attempt}/2 次）…",
+            need_manual_login=False,
+        )
+
+        restored = False
+        last_status = {}
+        for _ in range(30):
+            time.sleep(1)
+            _napcat_cache = {"ts": 0, "data": None}
+            last_status = _napcat_probe_status_once()
+            if last_status.get("running") and last_status.get("logged_in"):
+                restored = True
+                break
+
+        if restored:
+            _napcat_cache = {"ts": 0, "data": None}
+            _napcat_recovery_update(
+                active=False,
+                attempt=attempt,
+                last_state="recovered",
+                message=f"QQ 登录已自动恢复（第 {attempt}/2 次尝试成功）",
+                need_manual_login=False,
+            )
+            return
+
+    _napcat_cache = {"ts": 0, "data": None}
+    _napcat_recovery_update(
+        active=False,
+        attempt=2,
+        last_state="manual_required",
+        message="自动恢复两次均失败，需重新扫码登录",
+        need_manual_login=True,
+    )
+
+
+def _napcat_maybe_start_auto_recovery(result):
+    global _napcat_last_login_seen
+    is_login = bool(result.get("logged_in"))
+    running = bool(result.get("running"))
+    recovery = _napcat_recovery_snapshot()
+    should_trigger = (
+        running
+        and not is_login
+        and _napcat_last_login_seen is True
+        and not recovery.get("active")
+        and not recovery.get("need_manual_login")
+    )
+    _napcat_last_login_seen = is_login
+    if should_trigger:
+        thread = threading.Thread(target=_napcat_auto_recover_worker, daemon=True)
+        thread.start()
+
+
 def get_napcat_status():
     global _napcat_cache
     now = time.time()
     if _napcat_cache["data"] is not None and now - _napcat_cache["ts"] < _CACHE_TTL:
         return _napcat_cache["data"]
-    cred = _napcat_credential()
-    token = _resolve_napcat_token()
-    if not cred:
-        result = {"running": _is_napcat_process_running(), "logged_in": False, "token": token}
-    else:
-        d = _napcat_post("/api/QQLogin/CheckLoginStatus", cred)
-        is_login = d.get("data", {}).get("isLogin", False)
-        result = {"running": True, "logged_in": is_login, "_cred": cred, "token": token}
+    result = _napcat_probe_status_once()
+    if result.get("logged_in"):
+        _napcat_recovery_update(
+            active=False,
+            attempt=0,
+            last_state="idle",
+            message="",
+            need_manual_login=False,
+        )
+    _napcat_maybe_start_auto_recovery(result)
+    result["recovery"] = _napcat_recovery_snapshot()
     _napcat_cache = {"ts": now, "data": result}
     return result
 
@@ -483,6 +668,86 @@ def refresh_qrcode(cred):
         "before": before,
         "after": after,
         "changed": changed,
+    }
+
+
+def restart_napcat_and_refresh_qrcode():
+    global _napcat_cache
+    _napcat_recovery_update(
+        active=False,
+        attempt=0,
+        last_state="manual_restart",
+        message="",
+        need_manual_login=False,
+    )
+    try:
+        proc = subprocess.run(
+            ["systemctl", "restart", "napcat"],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+    except Exception as e:
+        return {
+            "ok": False,
+            "message": f"重启 NapCat 失败: {e}",
+            "restart": {"returncode": -1, "stderr": str(e)},
+        }
+
+    if proc.returncode != 0:
+        return {
+            "ok": False,
+            "message": "重启 NapCat 失败",
+            "restart": {
+                "returncode": proc.returncode,
+                "stdout": proc.stdout[-500:],
+                "stderr": proc.stderr[-500:],
+            },
+        }
+
+    _napcat_cache = {"ts": 0, "data": None}
+    last_status = {}
+    for _ in range(30):
+        time.sleep(1)
+        _napcat_cache = {"ts": 0, "data": None}
+        last_status = get_napcat_status()
+        if last_status.get("running"):
+            break
+
+    cred = last_status.get("_cred") or _napcat_credential()
+    if not cred:
+        return {
+            "ok": False,
+            "message": "NapCat 已重启，但暂时未拿到新的登录凭据",
+            "restart": {"returncode": proc.returncode},
+            "status": last_status,
+        }
+
+    refresh = refresh_qrcode(cred)
+    upstream = refresh.get("upstream") or {}
+    upstream_ok = upstream.get("status") == "ok" or upstream.get("code") in (0, 200)
+    changed = refresh.get("changed") is True
+    qrcode_url = refresh.get("qrcode_url", "")
+    if upstream_ok and qrcode_url:
+        message = "已重启 NapCat 并刷新二维码" if changed else "已重启 NapCat，但二维码链接仍未变化"
+        return {
+            "ok": True,
+            "message": message,
+            "changed": changed,
+            "qrcode": refresh.get("after"),
+            "qrcode_url": qrcode_url,
+            "status": last_status,
+            "upstream": upstream,
+        }
+
+    return {
+        "ok": False,
+        "message": "NapCat 已重启，但未拿到新的二维码链接",
+        "changed": changed,
+        "qrcode": refresh.get("after"),
+        "qrcode_url": qrcode_url,
+        "status": last_status,
+        "upstream": upstream,
     }
 
 
@@ -524,27 +789,32 @@ def get_baidu_status():
         return _baidu_cache["data"]
     try:
         cfg = json.load(open('/etc/baidu-openapi.json'))
-        token = cfg.get('access_token', '')
-        req = urllib.request.Request(
-            f"https://pan.baidu.com/rest/2.0/xpan/nas?method=uinfo&access_token={token}")
-        resp = urllib.request.urlopen(req, timeout=8)
-        uinfo = json.loads(resp.read().decode())
+        uinfo = _baidu_openapi_uinfo(cfg)
         name = uinfo.get('baidu_name', '')
-        data = {'logged_in': bool(name), 'username': name}
-    except Exception:
-        data = {'logged_in': False, 'username': ''}
+        data = {
+            'logged_in': bool(name),
+            'username': name,
+            'mode': 'openapi',
+            'auto_refresh': True,
+            'message': '使用百度网盘 Open API 授权，access token 过期后会自动刷新',
+        }
+    except Exception as e:
+        data = {
+            'logged_in': False,
+            'username': '',
+            'mode': 'openapi',
+            'auto_refresh': True,
+            'message': str(e),
+        }
     _baidu_cache = {"ts": now, "data": data}
     return data
 
 
 def baidu_login(bduss, stoken):
-    result = subprocess.run(
-        ['BaiduPCS-Go', 'login', f'-bduss={bduss}', f'-stoken={stoken}'],
-        capture_output=True, text=True
-    )
-    output = (result.stdout + result.stderr).strip()
-    success = '登录成功' in output
-    return {'success': success, 'message': output}
+    return {
+        'success': False,
+        'message': 'Deprecated: 百度云已切换为 Open API 授权，不再使用 BaiduPCS-Go Cookie 登录',
+    }
 
 
 # ── 百度扫码登录 ─────────────────────────────────────────────
@@ -624,45 +894,24 @@ def _baidu_qr_poll_loop(sign):
 
 
 def baidu_qr_start():
-    """获取百度扫码登录二维码，启动后台轮询线程"""
-    url = ("https://passport.baidu.com/v2/api/getqrcode?lp=pc&qrloginfrom=pc"
-           "&apiver=v3&tpl=netdisk&tt=%d" % int(time.time() * 1000))
-    req = urllib.request.Request(url, headers={'User-Agent': _BAIDU_UA})
-    resp = urllib.request.urlopen(req, timeout=10)
-    text = resp.read().decode()
-    m = re.search(r'\((.*)\)', text, re.DOTALL)
-    data = json.loads(m.group(1)) if m else json.loads(text)
-    sign = data.get('sign', '')
-    img_url = 'https://' + data.get('imgurl', '')
-    _baidu_qr['sign'] = sign
-    _baidu_qr['status'] = 'waiting'
-    _baidu_qr['message'] = ''
-    _baidu_qr['login'] = None
-    t = threading.Thread(target=_baidu_qr_poll_loop, args=(sign,), daemon=True)
-    t.start()
-    _baidu_qr['thread'] = t
-    return {'success': True, 'sign': sign, 'imgUrl': img_url}
+    return {
+        'success': False,
+        'message': 'Deprecated: 百度云已切换为 Open API 授权，不再提供二维码 Cookie 登录',
+    }
 
 
 def baidu_qr_poll():
-    """前端查询缓存的扫码状态（不阻塞）"""
-    st = _baidu_qr.get('status', '')
-    if not st:
-        return {'status': 'error', 'message': 'No QR session'}
-    result = {'status': st}
-    if st == 'success' and _baidu_qr.get('login'):
-        result['login'] = _baidu_qr['login']
-    if st in ('error', 'expired'):
-        result['message'] = _baidu_qr.get('message', '')
-    return result
+    return {
+        'status': 'error',
+        'message': 'Deprecated: 百度云已切换为 Open API 授权，不再提供二维码 Cookie 登录',
+    }
 
 
 def baidu_logout():
-    result = subprocess.run(
-        ['BaiduPCS-Go', 'logout', '-y'],
-        capture_output=True, text=True, input='y'
-    )
-    return {'success': result.returncode == 0}
+    return {
+        'success': False,
+        'message': 'Deprecated: 百度云当前不是可退出的 Cookie 登录模式',
+    }
 
 
 def qq_switch_account():
@@ -1014,6 +1263,7 @@ class StatusHandler(BaseHTTPRequestHandler):
                     'logged_in': napcat['logged_in'],
                     'token': napcat.get('token', ''),
                     'qrcode_url': qrcode_url,
+                    'recovery': napcat.get('recovery', {}),
                 },
                 'baidu':  get_baidu_status(),
                 'notify': load_notify_config(),
@@ -1033,39 +1283,26 @@ class StatusHandler(BaseHTTPRequestHandler):
             _json_response(self, get_brec_rooms())
 
         elif self.path == '/api/refresh-qrcode':
-            napcat = get_napcat_status()
-            if napcat.get('_cred'):
-                refresh = refresh_qrcode(napcat['_cred'])
-                upstream = refresh.get('upstream') or {}
-                upstream_ok = upstream.get('status') == 'ok' or upstream.get('code') in (0, 200)
-                changed = refresh.get('changed') is True
-                if upstream_ok and changed:
-                    _json_response(self, {
-                        'code': 0,
-                        'message': '二维码已刷新',
-                        'changed': True,
-                        'qrcode': refresh.get('after'),
-                        'qrcode_url': refresh.get('qrcode_url', ''),
-                    })
-                elif upstream_ok:
-                    _json_response(self, {
-                        'code': 0,
-                        'message': '已请求刷新二维码，页面将使用最新登录链接重新生成二维码',
-                        'changed': False,
-                        'qrcode': refresh.get('after'),
-                        'qrcode_url': refresh.get('qrcode_url', ''),
-                    })
-                else:
-                    _json_response(self, {
-                        'code': -1,
-                        'message': 'NapCat 已收到刷新请求，但未返回成功结果',
-                        'changed': changed,
-                        'qrcode': refresh.get('after'),
-                        'qrcode_url': refresh.get('qrcode_url', ''),
-                        'upstream': upstream,
-                    }, 502)
+            result = restart_napcat_and_refresh_qrcode()
+            if result.get('ok'):
+                _json_response(self, {
+                    'code': 0,
+                    'message': result.get('message', '已重启 NapCat 并刷新二维码'),
+                    'changed': result.get('changed', False),
+                    'qrcode': result.get('qrcode'),
+                    'qrcode_url': result.get('qrcode_url', ''),
+                })
             else:
-                _json_response(self, {'code': -1, 'message': 'napcat not running'})
+                _json_response(self, {
+                    'code': -1,
+                    'message': result.get('message', '重启 NapCat 并刷新二维码失败'),
+                    'changed': result.get('changed', False),
+                    'qrcode': result.get('qrcode'),
+                    'qrcode_url': result.get('qrcode_url', ''),
+                    'upstream': result.get('upstream', {}),
+                    'status': result.get('status', {}),
+                    'restart': result.get('restart', {}),
+                }, 502)
 
         else:
             self.send_response(404)

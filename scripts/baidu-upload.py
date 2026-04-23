@@ -14,6 +14,31 @@ CONFIG_PATH = "/etc/baidu-openapi.json"
 SLICE_SIZE = 4 * 1024 * 1024  # 4MB per slice
 RESUME_DIR = "/tmp/baidu-upload-resume"
 
+
+def _extract_error_payload(exc):
+    if not isinstance(exc, urllib.error.HTTPError):
+        return {}
+    try:
+        body = exc.read().decode()
+        return json.loads(body) if body else {}
+    except Exception:
+        return {}
+
+
+def _is_token_error(payload):
+    if not isinstance(payload, dict):
+        return False
+    errno = payload.get('errno')
+    error_code = payload.get('error_code')
+    error = str(payload.get('error', '')).lower()
+    msg = str(payload.get('error_msg', '')).lower()
+    return (
+        errno == -6 or
+        error_code in (6, 110, 111) or
+        error in ('expired_token', 'invalid_access_token') or
+        'access token' in msg
+    )
+
 def load_config():
     with open(CONFIG_PATH) as f:
         return json.load(f)
@@ -34,11 +59,18 @@ def refresh_token(cfg):
     result = json.loads(resp.read().decode())
     if 'access_token' in result:
         cfg['access_token'] = result['access_token']
-        cfg['refresh_token'] = result['refresh_token']
-        cfg['expires_in'] = result['expires_in']
+        cfg['refresh_token'] = result.get('refresh_token', cfg.get('refresh_token', ''))
+        cfg['expires_in'] = result.get('expires_in', cfg.get('expires_in', 0))
         save_config(cfg)
         return True
     return False
+
+
+def ensure_fresh_token(cfg, payload=None, force=False):
+    if not force and not _is_token_error(payload):
+        return False
+    return refresh_token(cfg)
+
 
 def api_request(url, cfg, data=None, method='GET', retry=True):
     sep = '&' if '?' in url else '?'
@@ -48,29 +80,18 @@ def api_request(url, cfg, data=None, method='GET', retry=True):
         req.add_header('Content-Type', 'application/x-www-form-urlencoded')
     try:
         resp = urllib.request.urlopen(req, timeout=60)
-        return json.loads(resp.read().decode())
+        result = json.loads(resp.read().decode())
+        if retry and ensure_fresh_token(cfg, result):
+            return api_request(url, cfg, data=data, method=method, retry=False)
+        return result
     except urllib.error.HTTPError as e:
-        body = e.read().decode()
-        err = json.loads(body) if body else {}
-        if err.get('errno') == -6 and retry:
-            # token expired, refresh
-            if refresh_token(cfg):
-                return api_request(url, cfg, data=data, method=method, retry=False)
+        err = _extract_error_payload(e)
+        if retry and ensure_fresh_token(cfg, err):
+            return api_request(url, cfg, data=data, method=method, retry=False)
         raise
 
-def precreate(cfg, remote_path, file_size, block_md5_list):
-    """预创建文件"""
-    data = urllib.parse.urlencode({
-        'path': remote_path,
-        'size': file_size,
-        'isdir': 0,
-        'autoinit': 1,
-        'rtype': 3,  # 覆盖同名文件
-        'block_list': json.dumps(block_md5_list),
-    }).encode()
-    return api_request('https://pan.baidu.com/rest/2.0/xpan/file?method=precreate', cfg, data=data, method='POST')
 
-def upload_slice(cfg, upload_id, part_seq, slice_data):
+def upload_slice(cfg, upload_id, part_seq, slice_data, retry=True):
     """上传单个分片"""
     boundary = '----WebKitFormBoundary' + hashlib.md5(str(time.time()).encode()).hexdigest()[:16]
     body = b''
@@ -89,8 +110,31 @@ def upload_slice(cfg, upload_id, part_seq, slice_data):
     url = f"https://d.pcs.baidu.com/rest/2.0/pcs/superfile2?{params}"
     req = urllib.request.Request(url, data=body, method='POST')
     req.add_header('Content-Type', f'multipart/form-data; boundary={boundary}')
-    resp = urllib.request.urlopen(req, timeout=300)
-    return json.loads(resp.read().decode())
+    try:
+        resp = urllib.request.urlopen(req, timeout=300)
+        result = json.loads(resp.read().decode())
+        if retry and ensure_fresh_token(cfg, result):
+            return upload_slice(cfg, upload_id, part_seq, slice_data, retry=False)
+        return result
+    except urllib.error.HTTPError as e:
+        err = _extract_error_payload(e)
+        if retry and ensure_fresh_token(cfg, err):
+            return upload_slice(cfg, upload_id, part_seq, slice_data, retry=False)
+        raise
+
+
+def precreate(cfg, remote_path, file_size, block_md5_list):
+    """预创建文件"""
+    data = urllib.parse.urlencode({
+        'path': remote_path,
+        'size': file_size,
+        'isdir': 0,
+        'autoinit': 1,
+        'rtype': 3,  # 覆盖同名文件
+        'block_list': json.dumps(block_md5_list),
+    }).encode()
+    return api_request('https://pan.baidu.com/rest/2.0/xpan/file?method=precreate', cfg, data=data, method='POST')
+
 
 def create_file(cfg, remote_path, file_size, upload_id, block_md5_list):
     """合并分片，创建文件"""
@@ -103,6 +147,27 @@ def create_file(cfg, remote_path, file_size, upload_id, block_md5_list):
         'block_list': json.dumps(block_md5_list),
     }).encode()
     return api_request('https://pan.baidu.com/rest/2.0/xpan/file?method=create', cfg, data=data, method='POST')
+
+
+def precreate_with_retry(cfg, remote_path, file_size, block_md5_list):
+    for attempt in range(2):
+        pre = precreate(cfg, remote_path, file_size, block_md5_list)
+        if pre.get('errno') == 0:
+            return pre
+        if not ensure_fresh_token(cfg, pre):
+            return pre
+    return precreate(cfg, remote_path, file_size, block_md5_list)
+
+
+def create_file_with_retry(cfg, remote_path, file_size, upload_id, block_md5_list):
+    for attempt in range(2):
+        result = create_file(cfg, remote_path, file_size, upload_id, block_md5_list)
+        if result.get('errno') == 0:
+            return result
+        if not ensure_fresh_token(cfg, result):
+            return result
+    return create_file(cfg, remote_path, file_size, upload_id, block_md5_list)
+
 
 def get_resume_path(local_path):
     """获取断点续传状态文件路径"""
@@ -202,7 +267,7 @@ def upload_file(local_path, remote_path):
     # 4. 合并创建（带重试）
     for attempt in range(5):
         try:
-            result = create_file(cfg, remote_path, file_size, upload_id, block_md5_list)
+            result = create_file_with_retry(cfg, remote_path, file_size, upload_id, block_md5_list)
             if result.get('errno') == 0:
                 print(f"[upload] OK: {remote_path} size={result.get('size',0)}", flush=True)
                 clear_resume(local_path)

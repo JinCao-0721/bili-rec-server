@@ -235,37 +235,6 @@ function DiskCard(props) {
 /* ── Baidu Card ────────────────────────────────────────────── */
 function BaiduCard(props) {
   const data   = props.data;
-  const [open,   setOpen]   = useState(false);
-  const [bduss,  setBduss]  = useState('');
-  const [stoken, setStoken] = useState('');
-  const [msg,    setMsg]    = useState({ text: '', type: '' });
-
-  async function doLogin() {
-    if (!bduss.trim()) { setMsg({ text: '请输入 BDUSS', type: 'err' }); return; }
-    setMsg({ text: '登录中…', type: '' });
-    try {
-      const res = await fetch('/bili-baidu-login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ bduss: bduss.trim(), stoken: stoken.trim() }),
-      });
-      const d = await res.json();
-      if (d.success) {
-        setOpen(false); setBduss(''); setStoken('');
-        setMsg({ text: '登录成功', type: 'ok' });
-      } else {
-        setMsg({ text: '登录失败：' + d.message, type: 'err' });
-      }
-    } catch (e) { setMsg({ text: '请求失败', type: 'err' }); }
-  }
-
-  async function doLogout() {
-    if (!confirm('确认退出百度云？退出后上传功能将不可用。')) return;
-    const res = await fetch('/bili-baidu-logout', { method: 'POST' });
-    const d   = await res.json();
-    if (!d.success) setMsg({ text: '退出失败', type: 'err' });
-  }
-
   const loggedIn = data && data.logged_in;
   return (
     <div className="bg-white/[0.05] rounded-2xl p-5">
@@ -275,25 +244,14 @@ function BaiduCard(props) {
         <span>{!data ? '检测中' : loggedIn ? '已登录' : '未登录'}</span>
       </div>
       {loggedIn && data.username && <div className="text-xs text-white/40 mt-1">{data.username}</div>}
-      {data && !loggedIn && <div className="text-xs text-white/30 mt-1">上传功能不可用</div>}
-      <div className="flex gap-2 mt-3">
-        {loggedIn
-          ? <Btn size="sm" color="red" onClick={doLogout}>退出登录</Btn>
-          : <Btn size="sm" onClick={function() { setOpen(function(o) { return !o; }); }}>登录</Btn>}
+      <div className="text-xs text-white/30 mt-1">
+        {!data ? '状态加载中' : (data.message || '使用百度网盘 Open API 授权')}
       </div>
-      {open && (
-        <div className="mt-3 space-y-2">
-          <Field type="password" placeholder="BDUSS" value={bduss}
-            onChange={function(e) { setBduss(e.target.value); }} className="w-full" />
-          <Field type="password" placeholder="STOKEN（可选）" value={stoken}
-            onChange={function(e) { setStoken(e.target.value); }} className="w-full" />
-          <div className="flex gap-2">
-            <Btn size="sm" onClick={doLogin}>确认</Btn>
-            <Btn size="sm" color="muted" onClick={function() { setOpen(false); setMsg({ text: '', type: '' }); }}>取消</Btn>
-          </div>
-        </div>
-      )}
-      <Msg text={msg.text} type={msg.type} />
+      <div className="mt-3 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2 text-xs text-white/50">
+        <div>授权方式：Open API</div>
+        <div>自动刷新：{data && data.auto_refresh ? '已启用' : '未知'}</div>
+        <div>Cookie / BaiduPCS-Go 登录：已停用</div>
+      </div>
     </div>
   );
 }
@@ -364,30 +322,20 @@ function QQBotSection(props) {
   const loggedIn  = data && data.logged_in;
   const token     = data && data.token;
   const qrcodeUrl = data && data.qrcode_url;
+  const recovery  = data && data.recovery || {};
+  const recovering = !!recovery.active;
+  const needManualLogin = !!recovery.need_manual_login;
   const needQR    = running && !loggedIn;
 
-  const [countdown,  setCountdown] = useState(150);
   const [imgKey,     setImgKey]    = useState(Date.now());
   const [logoutMsg,  setLogoutMsg] = useState('');
   const [refreshMsg, setRefreshMsg] = useState('');
   const [refreshing, setRefreshing] = useState(false);
-  const timerRef = useRef(null);
-
-  function startCountdown() {
-    clearInterval(timerRef.current);
-    setCountdown(150);
-    timerRef.current = setInterval(function() {
-      setCountdown(function(c) {
-        if (c <= 1) { doRefreshQR(); return 150; }
-        return c - 1;
-      });
-    }, 1000);
-  }
 
   async function doRefreshQR() {
     if (refreshing) return;
     setRefreshing(true);
-    setRefreshMsg('正在刷新二维码…');
+    setRefreshMsg('正在重启 NapCat 并刷新二维码…');
     try {
       const res = await fetch('/bili-refresh-qrcode');
       let d = {};
@@ -399,15 +347,14 @@ function QQBotSection(props) {
         return;
       }
       if (!res.ok || d.code !== 0) {
-        setRefreshMsg('刷新失败：' + ((d && d.message) || '未知错误'));
+        setRefreshMsg('操作失败：' + ((d && d.message) || '未知错误'));
         return;
       }
       if (props.onRefreshQrcode && d.qrcode_url) props.onRefreshQrcode(d.qrcode_url);
       setImgKey(Date.now());
-      setRefreshMsg(d.message || '二维码已刷新');
-      startCountdown();
+      setRefreshMsg(d.message || '已重启 NapCat 并刷新二维码');
     } catch (e) {
-      setRefreshMsg('刷新失败：网络请求异常');
+      setRefreshMsg('操作失败：网络请求异常');
     } finally {
       setRefreshing(false);
     }
@@ -430,18 +377,16 @@ function QQBotSection(props) {
     }
   }
 
-  useEffect(function() {
-    if (needQR) startCountdown();
-    else clearInterval(timerRef.current);
-    return function() { clearInterval(timerRef.current); };
-  }, [needQR]);
-
-  const dotColor = !running ? 'gray' : loggedIn ? 'green' : 'yellow';
+  const dotColor = !running ? 'gray' : loggedIn ? 'green' : recovering ? 'blue' : needManualLogin ? 'red' : 'yellow';
   const title    = !running ? 'QQ 机器人未运行'
                  : loggedIn ? 'QQ 机器人已登录'
+                 : recovering ? '正在尝试自动恢复'
+                 : needManualLogin ? '需重新扫码'
                  : '待扫码登录';
   const desc     = !running ? 'NapCat 服务未启动。'
                  : loggedIn ? '机器人在线，直播开播时将自动发送通知。'
+                 : recovering ? (recovery.message || '检测到掉线，正在自动重启 NapCat 并等待恢复。')
+                 : needManualLogin ? '自动恢复两次均失败，请用手机 QQ 重新扫码登录机器人账号。'
                  : '请用手机 QQ 扫描二维码登录机器人账号。';
 
   return (
@@ -463,13 +408,16 @@ function QQBotSection(props) {
           {loggedIn && token && (
             <p className="text-xs text-white/25 mt-1 font-mono">Token: {token}</p>
           )}
+          {!loggedIn && recovery && recovery.message && (
+            <p className="text-xs text-white/35 mt-1.5">{recovery.message}</p>
+          )}
           {needQR && (
-            <p className="text-xs text-white/25 mt-1.5">二维码将在 {countdown} 秒后自动刷新{qrcodeUrl ? '（当前为实时登录链接生成）' : ''}</p>
+            <p className="text-xs text-white/25 mt-1.5">二维码不会自动刷新，请手动点击下方按钮重启 NapCat 并获取最新二维码。</p>
           )}
           <div className="flex gap-2 mt-3">
             {needQR && (
-              <Btn size="sm" onClick={doRefreshQR} disabled={refreshing}>
-                <span className="flex items-center gap-1.5"><IcoRefresh />{refreshing ? '刷新中…' : '刷新二维码'}</span>
+              <Btn size="sm" onClick={doRefreshQR} disabled={refreshing || recovering}>
+                <span className="flex items-center gap-1.5"><IcoRefresh />{recovering ? '自动恢复中…' : refreshing ? '重启中…' : '重启 NapCat 并刷新二维码'}</span>
               </Btn>
             )}
             {loggedIn && (
@@ -902,7 +850,7 @@ function App() {
               录播姬管理 →
             </a>
             <br />
-            <a href={'http://' + location.hostname + ':6099/'} className="text-sm text-[#0a84ff] hover:opacity-75 transition-opacity">
+            <a href={window.location.protocol + '//' + location.hostname + '/webui/' + (napcat && napcat.token ? ('?token=' + encodeURIComponent(napcat.token)) : '')} target="_blank" rel="noreferrer" className="text-sm text-[#0a84ff] hover:opacity-75 transition-opacity">
               QQ 机器人管理 →
             </a>
           </div>
