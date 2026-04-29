@@ -55,10 +55,39 @@ nano /usr/local/bin/bili-status.py
 上传已从 BaiduPCS-Go 迁移至百度网盘 Open API，需要配置 access token：
 
 ```bash
-nano /usr/local/bin/baidu-upload.py
+nano /etc/baidu-openapi.json
 ```
 
-在顶部填写 `APP_KEY`、`SECRET_KEY`、`ACCESS_TOKEN`、`REFRESH_TOKEN`。Token 可通过 [百度网盘开放平台](https://pan.baidu.com/union/doc/ol0rsap9s) 申请获取。
+填写以下 JSON：
+
+```json
+{
+  "app_key": "你的百度网盘开放平台 App Key",
+  "secret_key": "你的百度网盘开放平台 Secret Key",
+  "access_token": "你的 access_token",
+  "refresh_token": "你的 refresh_token",
+  "expires_in": 2592000
+}
+```
+
+说明：
+
+- `app_key`：百度开放平台应用的 App Key
+- `secret_key`：百度开放平台应用的 Secret Key
+- `access_token`：当前可用访问令牌
+- `refresh_token`：后续自动续期依赖它，必须填写
+- `expires_in`：当前 access token 的有效期秒数，后续自动刷新时会被更新
+
+程序会读取 `/etc/baidu-openapi.json`，而不是让你手改 `/usr/local/bin/baidu-upload.py`。  
+如果机器上没有 `/usr/local/bin/baidu-upload.py`，说明上传脚本本身还没部署，需要先把脚本复制到该路径。
+
+Token 可通过 [百度网盘开放平台](https://pan.baidu.com/union/doc/ol0rsap9s) 申请获取。配置完成后可用下面命令测试：
+
+```bash
+python3 /usr/local/bin/baidu-upload.py --list /
+```
+
+如果配置正确，会列出网盘根目录内容。
 
 ### 4. 启动服务
 
