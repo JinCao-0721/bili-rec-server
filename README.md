@@ -79,7 +79,12 @@ nano /etc/baidu-openapi.json
 
 - 程序读取的是 `/etc/baidu-openapi.json`，不是 `/usr/local/bin/baidu-upload.py`
 - `refresh_token` 必填，否则后续不能自动续期
-- 如果机器上没有 `/usr/local/bin/baidu-upload.py`，说明上传脚本还没部署
+- 如果机器上没有 `/usr/local/bin/baidu-upload.py`，先执行：
+
+```bash
+cp /root/bili-rec-server/scripts/baidu-upload.py /usr/local/bin/baidu-upload.py
+chmod +x /usr/local/bin/baidu-upload.py
+```
 
 配置完成后测试：
 

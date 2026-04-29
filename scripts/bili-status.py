@@ -8,7 +8,6 @@ import subprocess
 import os
 import time
 import threading
-import http.cookiejar
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -809,111 +808,6 @@ def get_baidu_status():
     _baidu_cache = {"ts": now, "data": data}
     return data
 
-
-def baidu_login(bduss, stoken):
-    return {
-        'success': False,
-        'message': 'Deprecated: 百度云已切换为 Open API 授权，不再使用 BaiduPCS-Go Cookie 登录',
-    }
-
-
-# ── 百度扫码登录 ─────────────────────────────────────────────
-_baidu_qr = {'sign': '', 'status': '', 'message': '', 'login': None, 'thread': None}
-_BAIDU_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'
-
-def _baidu_qr_poll_loop(sign):
-    """后台线程：持续轮询百度 unicast 直到成功/失败/超时"""
-    deadline = time.time() + 180  # 3 分钟超时
-    while time.time() < deadline and _baidu_qr.get('sign') == sign:
-        if _baidu_qr['status'] in ('success', 'error'):
-            return
-        url = ("https://passport.baidu.com/channel/unicast?channel_id=%s"
-               "&tpl=netdisk&apiver=v3&tt=%d" % (sign, int(time.time() * 1000)))
-        req = urllib.request.Request(url, headers={'User-Agent': _BAIDU_UA})
-        try:
-            resp = urllib.request.urlopen(req, timeout=30)
-            text = resp.read().decode()
-            m = re.search(r'\((.*)\)', text, re.DOTALL)
-            data = json.loads(m.group(1)) if m else json.loads(text)
-            print(f"[BaiduQR] unicast errno={data.get('errno')} channel_v={str(data.get('channel_v',''))[:100]}", flush=True)
-            if data.get('errno', -1) != 0:
-                continue
-            channel_v = data.get('channel_v', '')
-            if not channel_v:
-                continue
-            inner = json.loads(channel_v)
-            st = inner.get('status', -1)
-            print(f"[BaiduQR] inner status={st} v_len={len(inner.get('v',''))}", flush=True)
-            if st == 1:
-                # status=1: 已扫码，等待确认
-                _baidu_qr['status'] = 'scanned'
-            elif st == 0:
-                # status=0: 已确认，v 字段包含 bduss
-                _baidu_qr['status'] = 'confirming'
-                v = inner.get('v', '')
-                # v 本身就是 bduss
-                print(f"[BaiduQR] v={v[:40]}... len={len(v)}", flush=True)
-                login_result = baidu_login(v, '')
-                print(f"[BaiduQR] login result: {login_result}", flush=True)
-                if login_result.get('success'):
-                    _baidu_qr['status'] = 'success'
-                    _baidu_qr['login'] = login_result
-                else:
-                    # 回退：尝试 exchange URL
-                    exchange_url = ("https://passport.baidu.com/v3/login/main/qrbdusslogin"
-                                    "?v=%d&bduss=%s&loginVersion=v5&qrcode=1&tpl=netdisk"
-                                    "&apiver=v3&tt=%d" %
-                                    (int(time.time() * 1000), v, int(time.time() * 1000)))
-                    cj = http.cookiejar.CookieJar()
-                    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cj))
-                    req2 = urllib.request.Request(exchange_url, headers={'User-Agent': _BAIDU_UA})
-                    try:
-                        resp2 = opener.open(req2, timeout=10)
-                        body = resp2.read().decode()
-                        print(f"[BaiduQR] exchange body={body[:200]}", flush=True)
-                    except Exception as ex:
-                        print(f"[BaiduQR] exchange error: {ex}", flush=True)
-                    bduss = stoken = ''
-                    for ck in cj:
-                        print(f"[BaiduQR] cookie: {ck.name}={ck.value[:30]}...", flush=True)
-                        if ck.name == 'BDUSS': bduss = ck.value
-                        elif ck.name == 'STOKEN': stoken = ck.value
-                    if bduss:
-                        login_result = baidu_login(bduss, stoken)
-                        _baidu_qr['status'] = 'success'
-                        _baidu_qr['login'] = login_result
-                    else:
-                        _baidu_qr['status'] = 'error'
-                        _baidu_qr['message'] = 'Failed to extract BDUSS'
-                return
-        except Exception as e:
-            print(f"[BaiduQR] poll error: {e}", flush=True)
-    if _baidu_qr.get('sign') == sign and _baidu_qr['status'] not in ('success', 'error'):
-        _baidu_qr['status'] = 'expired'
-        _baidu_qr['message'] = '二维码已过期，请重新获取'
-
-
-def baidu_qr_start():
-    return {
-        'success': False,
-        'message': 'Deprecated: 百度云已切换为 Open API 授权，不再提供二维码 Cookie 登录',
-    }
-
-
-def baidu_qr_poll():
-    return {
-        'status': 'error',
-        'message': 'Deprecated: 百度云已切换为 Open API 授权，不再提供二维码 Cookie 登录',
-    }
-
-
-def baidu_logout():
-    return {
-        'success': False,
-        'message': 'Deprecated: 百度云当前不是可退出的 Cookie 登录模式',
-    }
-
-
 def qq_switch_account():
     subprocess.run(['systemctl', 'stop', 'napcat'], capture_output=True)
     # 清除 NapCat 自动登录账号
@@ -1150,31 +1044,6 @@ class StatusHandler(BaseHTTPRequestHandler):
                 _json_response(self, {'code': 0, 'message': 'ok'})
             except Exception as e:
                 _json_response(self, {'code': -1, 'message': str(e)}, 400)
-
-        elif self.path == '/api/baidu-login':
-            length = int(self.headers.get('Content-Length', 0))
-            body = self.rfile.read(length)
-            try:
-                d = json.loads(body)
-                result = baidu_login(d.get('bduss', ''), d.get('stoken', ''))
-                _json_response(self, result)
-            except Exception as e:
-                _json_response(self, {'success': False, 'message': str(e)}, 400)
-
-        elif self.path == '/api/baidu-qr-start':
-            try:
-                _json_response(self, baidu_qr_start())
-            except Exception as e:
-                _json_response(self, {'success': False, 'message': str(e)}, 500)
-
-        elif self.path == '/api/baidu-qr-poll':
-            try:
-                _json_response(self, baidu_qr_poll())
-            except Exception as e:
-                _json_response(self, {'status': 'error', 'message': str(e)}, 500)
-
-        elif self.path == '/api/baidu-logout':
-            _json_response(self, baidu_logout())
 
         elif self.path == '/api/qq-logout':
             ok = qq_switch_account()
