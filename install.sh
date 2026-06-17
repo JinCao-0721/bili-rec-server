@@ -127,6 +127,10 @@ chmod +x /usr/local/bin/bili-status.py \
 
 # 复制 Web 页面
 cp "$SCRIPT_DIR/web/index.html" /var/www/status/index.html
+if [ -d "$SCRIPT_DIR/web/vendor" ]; then
+    mkdir -p /var/www/status/vendor
+    cp -a "$SCRIPT_DIR/web/vendor/." /var/www/status/vendor/
+fi
 
 # 复制 systemd 服务
 cp "$SCRIPT_DIR/services/brec.service"        /etc/systemd/system/
